@@ -34,5 +34,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pyright]
 # Each skill's scripts/ directory is its own import root: the scripts run
 # directly (`python3 scripts/track.py`), which puts scripts/ on sys.path.
-extraPaths = ["skills/literature-tracking/scripts"]
+extraPaths = [
+    "skills/literature-tracking/scripts",
+    "skills/paper-deep-reading/scripts",
+]
 pythonVersion = "3.9"
