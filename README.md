@@ -15,9 +15,30 @@ npx skills add Jinsong-Zhou/bio-research-skills
 
 | Skill | What it lifts off your plate | Status |
 |---|---|---|
-| `literature-tracking` | Three disconnected firehoses — arXiv q-bio, bioRxiv/medRxiv, PubMed. The same paper three times; alerts too broad or too narrow. | 🚧 in design |
+| [`literature-tracking`](skills/literature-tracking/) | Three disconnected firehoses — arXiv q-bio, bioRxiv/medRxiv, PubMed. The same paper three times; alerts too broad or too narrow. | ✅ v0.1 |
 | `paper-deep-reading` | Triage dozens a week, deep-read a few — most turn out "meh". Notes never get written; group slides cost a late night. | 📋 planned |
 | `code-reproduction` | A GitHub link ≠ the paper's numbers: dependency drift, CUDA mismatches, missing weights, an afternoon lost. | 📋 planned |
+
+### `literature-tracking`
+
+Queries all three sources in one pass, merges preprints with the journal
+versions they became, and hands the agent a ranked, deduplicated set.
+
+The part nobody else does is **preprint → published merging**. Every tool we
+surveyed keys on an exact DOI or an exact title string, so a bioRxiv preprint
+and its journal article stay two separate entries. Four tiers fix that:
+identical DOI, bioRxiv's own `published` field, Crossref's
+`is-preprint-of`/`has-preprint` relations, then a guarded title fingerprint.
+
+It also refuses to fail silently. Each of these returns **HTTP 200**:
+
+- arXiv answers a malformed query with a one-entry feed titled `Error`
+- bioRxiv **ignores an unknown subject area** and returns every paper in the
+  window — real papers, real DOIs, entirely unrelated to what you asked
+- PubMed's `<PubDate>` is often year-only, putting every record on 1 January
+
+Each has a guard, each is documented with measured evidence in
+[`references/source-quirks.md`](skills/literature-tracking/references/source-quirks.md).
 
 ---
 
@@ -72,6 +93,42 @@ Skills are self-contained: no shared runtime, install one without the others.
 5. **Permissive licenses only.** No AGPL, no research-only weights, no unlicensed code.
 
 ---
+
+## Development
+
+```bash
+uv sync
+uv run pytest -m "not live"   # offline suite
+uv run pytest -m live         # re-checks that the documented API quirks are still real
+uv run ruff check .
+```
+
+The `live` tests are the interesting ones: they assert that bioRxiv *still*
+ignores unknown categories and that arXiv *still* accepts structured queries.
+When upstream fixes something, those tests fail and tell us a guard can go.
+
+## Acknowledgements
+
+- **[openags/paper-search-mcp](https://github.com/openags/paper-search-mcp)**
+  (MIT) — the `Paper` record schema here mirrors its field names so records stay
+  interchangeable, and its `_paper_unique_key` is the baseline our dedup tier 0
+  reimplements. It remains the better tool for ad-hoc keyword search across 20+
+  sources; this skill is narrower on purpose, covering the date-windowed
+  tracking case its API surface does not expose.
+- **[RainerSeventeen/paper-tracker](https://github.com/RainerSeventeen/paper-tracker)**
+  (MIT) — dedup tier 3 follows the approach in its `core/dedup.py`: normalised
+  DOI, title + first-author + year fingerprint, minimum-length guard, and
+  source-rank primary selection.
+- **[Scholar Inbox](https://arxiv.org/abs/2504.08385)** (Krishnan et al.,
+  ACL 2025 demo) — the argument for a *calibrated* relevance score you can
+  threshold, rather than a fixed top-N, comes from their per-user ranking work.
+- **[TideDra/zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily)**
+  (AGPL-3.0) — studied for its recency-weighted profile ranking. **Ideas only;
+  no code was copied or adapted**, since AGPL is incompatible with this
+  repository's MIT license.
+- **[K-Dense-AI/scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills)**
+  (MIT) — the practice of documenting each API's silent-failure modes in
+  per-source `references/` files is theirs, and it is a good one.
 
 ## License
 
