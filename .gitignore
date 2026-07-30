@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+local-lock.json
+
+# Secrets — never commit API keys
+.env
+.env.*
+!.env.example
+
+# Local caches / scratch
+.cache/
+*.sqlite
+*.db
+dumps/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
