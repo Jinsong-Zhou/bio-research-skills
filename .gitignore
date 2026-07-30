@@ -29,3 +29,7 @@ Thumbs.db
 # Editors
 .vscode/
 .idea/
+
+# Agent scratch — throwaway git worktrees, not source. Also keeps `ruff check .`
+# from linting whatever half-finished branch happens to be checked out there.
+.claude/
