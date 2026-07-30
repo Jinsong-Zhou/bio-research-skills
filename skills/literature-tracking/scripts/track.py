@@ -23,10 +23,18 @@ from typing import Any
 
 from dedup import deduplicate
 from models import Paper
-from sources import arxiv, biorxiv, pubmed
+from sources import arxiv, biorxiv, europepmc, pubmed
 from sources._http import FetchError
 
-SOURCE_CHOICES = ("arxiv", "biorxiv", "medrxiv", "pubmed")
+SOURCE_CHOICES = ("arxiv", "biorxiv", "medrxiv", "pubmed", "europepmc")
+
+#: Below this window width the Crossref dedup rule cannot pay off, so `auto`
+#: turns it off. A preprint and the journal article it becomes are typically
+#: months or years apart, and a rule that merges them only fires when *both*
+#: land in the same query. Measured on a 7-day window: 60 lookups, 0 merges,
+#: and neither side carried a usable relation — publishers rarely deposit
+#: `has-preprint`, and a preprint posted this week has nothing to link to yet.
+CROSSREF_MIN_WINDOW_DAYS = 60
 _RELATIVE = re.compile(r"^(\d+)\s*([dwmy])$", re.IGNORECASE)
 _UNIT_DAYS = {"d": 1, "w": 7, "m": 30, "y": 365}
 
@@ -61,7 +69,12 @@ def _collect(
     def run(name: str, fetch) -> None:
         try:
             found = fetch()
-        except (FetchError, ValueError, arxiv.ArxivQueryError) as exc:
+        except (
+            FetchError,
+            ValueError,
+            arxiv.ArxivQueryError,
+            europepmc.EuropePmcQueryError,
+        ) as exc:
             errors.append({"source": name, "error": f"{type(exc).__name__}: {exc}"})
             print(f"  {name}: FAILED — {exc}", file=sys.stderr)
             return
@@ -110,21 +123,60 @@ def _collect(
             ),
         )
 
+    # The keyword channel onto the preprint servers. Needs keywords by
+    # definition, and only makes sense for servers we are already tracking.
+    servers = [s for s in ("biorxiv", "medrxiv") if s in args.sources]
+    if "europepmc" in args.sources and args.keywords and servers:
+        run(
+            "europepmc",
+            lambda: europepmc.search(
+                keywords=args.keywords,
+                since=args.since,
+                until=args.until,
+                publishers=servers,
+                max_results=args.max_per_source,
+            ),
+        )
+
     return papers, errors, counts
+
+
+def resolve_crossref(args: argparse.Namespace) -> tuple[bool, str]:
+    """Decide whether to run the Crossref rule; return the choice and why not.
+
+    ``auto`` weighs it against the window: the rule merges a preprint with the
+    journal article it became, which only helps when both fall inside the same
+    query. Over a week they almost never do.
+    """
+    if args.crossref == "on":
+        return True, ""
+    if args.crossref == "off":
+        return False, "disabled with --crossref off"
+    span = (args.until - args.since).days
+    if span < CROSSREF_MIN_WINDOW_DAYS:
+        return False, (
+            f"{span}-day window is under {CROSSREF_MIN_WINDOW_DAYS} days, so a preprint "
+            f"and its journal version cannot both be in range. Use --crossref on to force it"
+        )
+    return True, ""
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     papers, errors, counts = _collect(args)
 
-    # Tier 2 issues one Crossref request per unmatched DOI, so this phase can
-    # run for minutes with nothing to show. Say so, or it reads as a hang.
-    budget = 0 if args.no_crossref else min(args.max_crossref_lookups, len(papers))
+    use_crossref, reason = resolve_crossref(args)
+    if reason:
+        print(f"  Crossref rule off: {reason}", file=sys.stderr)
+
+    # Each Crossref request takes over a second, so this phase can run for
+    # minutes with nothing to show. Say so, or it reads as a hang.
+    budget = min(args.max_crossref_lookups, len(papers)) if use_crossref else 0
     detail = f"up to {budget} Crossref lookups, roughly {budget}s" if budget else "offline"
     print(f"Fetched {len(papers)} records; deduplicating ({detail})…", file=sys.stderr)
 
     merged, stats = deduplicate(
         papers,
-        use_crossref=not args.no_crossref,
+        use_crossref=use_crossref,
         max_crossref_lookups=args.max_crossref_lookups,
     )
 
@@ -133,6 +185,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         f"({stats.merges_by_tier or 'none'}) → {stats.papers_out} unique",
         file=sys.stderr,
     )
+    flagged = sum(1 for p in merged if p.extra.get("keyword_match"))
+    if flagged:
+        print(f"  {flagged} matched the keyword channel — read those first", file=sys.stderr)
+    if stats.crossref_lookups:
+        # Surface the yield so the budget can be tuned on evidence.
+        print(
+            f"  Crossref: {stats.crossref_lookups} lookups → "
+            f"{stats.merges_by_tier.get('crossref-relation', 0)} merges",
+            file=sys.stderr,
+        )
     if stats.crossref_skipped:
         print(
             f"  WARNING: {stats.crossref_skipped} records skipped tier-2 lookup "
@@ -156,6 +218,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "fetched_by_source": counts,
             "fetched_total": stats.papers_in,
             "unique_total": stats.papers_out,
+            "keyword_matched": flagged,
             "duplicates_merged": stats.duplicates_removed,
             "merges_by_tier": stats.merges_by_tier,
             "crossref_lookups": stats.crossref_lookups,
@@ -185,13 +248,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="window end as an ISO date (default: today)",
     )
     parser.add_argument(
-        "--sources", nargs="+", choices=SOURCE_CHOICES, default=["arxiv", "biorxiv", "pubmed"],
-        help="which sources to query (default: arxiv biorxiv pubmed)",
+        "--sources", nargs="+", choices=SOURCE_CHOICES,
+        default=["arxiv", "biorxiv", "pubmed", "europepmc"],
+        help="which sources to query (default: all but medrxiv)",
     )
     parser.add_argument(
         "--keywords", nargs="+", default=None,
-        help="terms ORed together for arXiv and PubMed. bioRxiv/medRxiv ignore "
-             "these — their API has no keyword search; use categories instead",
+        help="terms ORed together for arXiv, PubMed and Europe PMC. The bioRxiv "
+             "and medRxiv APIs ignore them — no keyword search exists there, "
+             "which is what the europepmc channel is for; use categories",
     )
     parser.add_argument(
         "--arxiv-categories", nargs="+", default=None,
@@ -214,14 +279,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="cap on records fetched per source (default: 200)",
     )
     parser.add_argument(
-        "--no-crossref", action="store_true",
-        help="skip dedup tier 2; faster and fully offline, but misses "
-             "preprint/journal pairs that bioRxiv has not yet linked",
+        "--crossref", choices=("auto", "on", "off"), default="auto",
+        help=f"the Crossref dedup rule, which catches papers retitled between "
+             f"preprint and publication. 'auto' (default) runs it only for "
+             f"windows of {CROSSREF_MIN_WINDOW_DAYS}+ days — over a week a "
+             f"preprint and its journal version are almost never both in range, "
+             f"and each lookup costs over a second",
     )
     parser.add_argument(
         "--max-crossref-lookups", type=int, default=60,
-        help="ceiling on dedup tier-2 requests, one per unmatched DOI "
-             "(default: 60). Raise it when the run warns about skipped lookups",
+        help="ceiling on Crossref requests, one per unmatched DOI (default: 60). "
+             "Raise it when the run warns about skipped lookups",
     )
     return parser
 

@@ -1,6 +1,6 @@
 """CLI argument handling and report assembly, fully offline."""
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 import track
@@ -34,9 +34,9 @@ class TestParseSince:
 class TestParser:
     def test_defaults(self):
         args = track.build_parser().parse_args([])
-        assert args.sources == ["arxiv", "biorxiv", "pubmed"]
+        assert args.sources == ["arxiv", "biorxiv", "pubmed", "europepmc"]
         assert args.max_per_source == 200
-        assert args.no_crossref is False
+        assert args.crossref == "auto"
 
     def test_unknown_source_is_rejected(self, capsys):
         with pytest.raises(SystemExit):
@@ -53,6 +53,39 @@ class TestParser:
         )
         assert args.keywords == ["cryo-EM", "folding"]
         assert args.biorxiv_categories == ["biochemistry"]
+
+
+class TestCrossrefAuto:
+    """The rule merges preprint with journal version — both must be in range."""
+
+    def _args(self, crossref, span_days):
+        args = track.build_parser().parse_args(["--crossref", crossref])
+        args.until = TODAY
+        args.since = TODAY - timedelta(days=span_days)
+        return args
+
+    def test_a_weekly_window_turns_it_off_with_a_reason(self):
+        enabled, reason = track.resolve_crossref(self._args("auto", 7))
+        assert enabled is False
+        assert "7-day window" in reason and "--crossref on" in reason
+
+    def test_a_wide_window_turns_it_on(self):
+        enabled, reason = track.resolve_crossref(self._args("auto", 180))
+        assert enabled is True
+        assert reason == ""
+
+    @pytest.mark.parametrize("span", [0, 59, 60, 365])
+    def test_the_threshold_is_the_only_thing_auto_looks_at(self, span):
+        enabled, _ = track.resolve_crossref(self._args("auto", span))
+        assert enabled is (span >= track.CROSSREF_MIN_WINDOW_DAYS)
+
+    def test_on_overrides_a_narrow_window(self):
+        assert track.resolve_crossref(self._args("on", 7)) == (True, "")
+
+    def test_off_overrides_a_wide_one(self):
+        enabled, reason = track.resolve_crossref(self._args("off", 365))
+        assert enabled is False
+        assert "--crossref off" in reason
 
 
 class TestReport:
@@ -80,7 +113,7 @@ class TestReport:
         )
         monkeypatch.setattr(track.pubmed, "search", lambda **kw: [])
 
-        report = track.build_report(self._args(no_crossref=True))
+        report = track.build_report(self._args(crossref="off"))
 
         assert len(report["papers"]) == 1
         assert [e["source"] for e in report["errors"]] == ["biorxiv"]
@@ -90,7 +123,7 @@ class TestReport:
         """Callers need to tell 'nothing new' from 'three sources fell over'."""
         for module in (track.arxiv, track.biorxiv, track.pubmed):
             monkeypatch.setattr(module, "search", lambda **kw: [])
-        report = track.build_report(self._args(no_crossref=True))
+        report = track.build_report(self._args(crossref="off"))
         assert report["errors"] == []
         assert report["papers"] == []
         assert report["stats"]["fetched_total"] == 0
@@ -98,7 +131,7 @@ class TestReport:
     def test_the_query_is_echoed_back_for_reproducibility(self, monkeypatch):
         for module in (track.arxiv, track.biorxiv, track.pubmed):
             monkeypatch.setattr(module, "search", lambda **kw: [])
-        report = track.build_report(self._args(no_crossref=True, keywords=["cryo-EM"]))
+        report = track.build_report(self._args(crossref="off", keywords=["cryo-EM"]))
         assert report["query"]["since"] == "2026-07-23"
         assert report["query"]["keywords"] == ["cryo-EM"]
         assert report["query"]["arxiv_categories"], "the q-bio default should be recorded"
@@ -113,7 +146,7 @@ class TestReport:
         )
         monkeypatch.setattr(track.pubmed, "search", lambda **kw: [])
 
-        report = track.build_report(self._args(no_crossref=True))
+        report = track.build_report(self._args(crossref="off"))
 
         assert report["stats"]["fetched_total"] == 2
         assert report["stats"]["unique_total"] == 1

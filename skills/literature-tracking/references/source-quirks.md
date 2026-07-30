@@ -190,6 +190,53 @@ block, not a 429. `_http._HOST_INTERVAL` paces to the anonymous limit.
 
 ---
 
+## Europe PMC
+
+The keyword-searchable door onto bioRxiv and medRxiv, which have no keyword
+search of their own. `SRC:"PPR"` scopes to preprints, `PUBLISHER:"bioRxiv"`
+narrows the server, `FIRST_PDATE:[a TO b]` bounds the window, and records carry
+the **same DOI** as the direct fetch, so dedup merges the two views for free.
+
+### It is a complement, not a replacement
+
+Measured against the bioRxiv API on 2026-07-30:
+
+| Date | Europe PMC | bioRxiv | Coverage |
+|---|---|---|---|
+| 07-23 | 183 | 261 | 70% |
+| 07-25 | 52 | 70 | 74% |
+| 07-27 | 186 | 238 | 78% |
+| 07-28 | 199 | 299 | 67% |
+| 07-29 | 90 | 210 | **43%** |
+| 07-30 | 0 | — | **0%** |
+
+Indexing lags about a day and settles below 80% even for older days. The
+newest records — the ones a tracking query exists to find — are the worst
+covered, so relying on this channel alone would quietly drop most of the week's
+new preprints.
+
+### Malformed queries return plausible results, not errors
+
+| Query | Result |
+|---|---|
+| `SRC:"PPR" AND (((unbalanced` | HTTP 200, **hitCount 2733** — the broken clause is dropped |
+| `NOSUCHFIELD:"x"` | HTTP 200, **hitCount 0** — indistinguishable from an empty window |
+
+A keyword containing a bracket, quote or colon is enough to trigger the first
+case. Two guards: strip query syntax out of user keywords before embedding
+them, and compare `request.queryString` in the response against what was sent —
+Europe PMC echoes the query it actually ran.
+
+### Other notes
+
+- `resultType=core` is needed for abstracts; `lite` omits them.
+- Paginate with `cursorMark`, starting at `*`. **`nextCursorMark` stops
+  changing at the end** rather than disappearing, so a loop that only checks
+  for its presence never terminates.
+- Author names come as `Smith J, Okafor A.` — surname first, like PubMed.
+- Coverage extends past bioRxiv/medRxiv to Research Square and others; filter
+  by `PUBLISHER` unless that is wanted.
+
 ## Crossref
 
 Preprint links are recorded from both directions:
@@ -202,7 +249,20 @@ Both entries look like `{"id-type": "doi", "id": "10.…", "asserted-by": "…"}
 Send a `User-Agent` with a `mailto:` — it buys the polite rate-limit pool.
 Set `BIO_RESEARCH_CONTACT` to your address.
 
-**Cost guard:** tier 2 issues one request per unmatched DOI, so `dedup.py`
-skips it entirely when the result set has only one source (a counterpart can
-only merge if the other record is already present), and caps the rest via
-`max_crossref_lookups`.
+### It costs ~1.4s a lookup, so spend the budget deliberately
+
+A measured run issued **216 lookups for zero merges**. The reason is
+structural: a lookup only merges when the counterpart is already in the result
+set, and a preprint posted this week cannot have a journal version yet — its
+journal article would have to predate it.
+
+`dedup.py` therefore runs Crossref **last**, after the free rules have taken
+what they can, and orders the remaining candidates by expected payoff:
+
+1. journal-side records — their preprint can be of any age
+2. revised preprints (v2+) — the original may already be published
+3. first-version preprints — essentially never pays off
+
+It also skips the rule entirely for single-source result sets, and caps the
+rest via `max_crossref_lookups`. This orders rather than excludes: a large
+enough budget still reaches every record, so no merge is lost, only deferred.

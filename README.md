@@ -26,16 +26,27 @@ versions they became, and hands the agent a ranked, deduplicated set.
 
 The part nobody else does is **preprint → published merging**. Every tool we
 surveyed keys on an exact DOI or an exact title string, so a bioRxiv preprint
-and its journal article stay two separate entries. Four tiers fix that:
-identical DOI, bioRxiv's own `published` field, Crossref's
-`is-preprint-of`/`has-preprint` relations, then a guarded title fingerprint.
+and its journal article stay two separate entries. Four rules fix that, cheapest
+first: identical DOI, bioRxiv's own `published` field, a guarded title
+fingerprint, then Crossref's `is-preprint-of`/`has-preprint` relations.
+
+Dedup also does double duty as a relevance signal. bioRxiv has no keyword
+search — you can filter by subject area and nothing else — so Europe PMC runs
+as a second, keyword-searchable view of the same preprints. It only covers
+~70% of them and lags a day, so it supplements rather than replaces the direct
+sweep; but the two views share DOIs, so they merge, and whatever came through
+the keyword channel is flagged `keyword_match`. Nothing is dropped, and the
+agent knows where to start reading.
 
 It also refuses to fail silently. Each of these returns **HTTP 200**:
 
 - arXiv answers a malformed query with a one-entry feed titled `Error`
 - bioRxiv **ignores an unknown subject area** and returns every paper in the
   window — real papers, real DOIs, entirely unrelated to what you asked
+- bioRxiv also pages at 30, not the 100 its cursor implies, **oldest first** —
+  so a naive read returns the stalest slice of the window
 - PubMed's `<PubDate>` is often year-only, putting every record on 1 January
+- Europe PMC drops query clauses it cannot parse and answers 200 anyway
 
 Each has a guard, each is documented with measured evidence in
 [`references/source-quirks.md`](skills/literature-tracking/references/source-quirks.md).

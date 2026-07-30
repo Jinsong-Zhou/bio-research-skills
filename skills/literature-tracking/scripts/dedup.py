@@ -51,8 +51,13 @@ from sources._http import FetchError, fetch_json
 CROSSREF_URL = "https://api.crossref.org/works"
 
 #: Lower rank wins the "primary record" slot. A journal article is the version
-#: of record; the preprint is kept alongside it in ``also_in``.
-SOURCE_RANK = {"pubmed": 0, "biorxiv": 1, "medrxiv": 1, "arxiv": 2}
+#: of record; the preprint is kept alongside it in ``also_in``. Europe PMC sits
+#: last because it mirrors the preprint servers — when both are present the
+#: direct record is richer (PDF link, subject area, version).
+SOURCE_RANK = {"pubmed": 0, "biorxiv": 1, "medrxiv": 1, "arxiv": 2, "europepmc": 3}
+
+#: Sources that publish preprints rather than versions of record.
+PREPRINT_SOURCES = frozenset({"biorxiv", "medrxiv", "arxiv", "europepmc"})
 
 #: Titles shorter than this are never fingerprint-matched. "Introduction" and
 #: "Supplementary Material" collide across unrelated papers.
@@ -164,6 +169,36 @@ def _crossref_counterpart(doi: str) -> str:
     return ""
 
 
+def _crossref_priority(paper: Paper) -> int:
+    """Expected payoff of a Crossref lookup — lower is spent first.
+
+    A lookup only merges when the counterpart is already in the result set, so
+    the odds differ sharply by what kind of record it is:
+
+    0. **Journal articles.** Their preprint can be of any age, so it may well
+       be in a window that also swept the preprint servers.
+    1. **Revised preprints (v2+).** The original may long since have been
+       published, and bioRxiv's ``published`` backfill sometimes lags.
+    2. **First-version preprints.** A journal version would have to predate the
+       preprint. Essentially never pays off — a measured run spent 216 lookups
+       here for zero merges.
+
+    This orders rather than excludes: with a large enough budget every record
+    is still checked, so no merge is lost, only deferred.
+    """
+    if paper.source not in PREPRINT_SOURCES:
+        return 0
+    version = str(paper.extra.get("version", "")) or _arxiv_version(paper)
+    return 1 if version not in ("", "1") else 2
+
+
+def _arxiv_version(paper: Paper) -> str:
+    """Version suffix from an arXiv id, e.g. '2601.01234v2' -> '2'."""
+    versioned = str(paper.extra.get("arxiv_id_versioned", ""))
+    _, _, suffix = versioned.rpartition("v")
+    return suffix if suffix.isdigit() else ""
+
+
 def _years_compatible(a: Paper, b: Paper, window: int) -> bool:
     if a.published_date is None or b.published_date is None:
         return True  # missing dates should not veto an otherwise strong match
@@ -186,6 +221,11 @@ def _merge_group(members: list[Paper], reasons: set[str]) -> Paper:
             primary.doi = other.doi
         primary.categories = list(dict.fromkeys(primary.categories + other.categories))
         primary.keywords = list(dict.fromkeys(primary.keywords + other.keywords))
+        # Reaching a record through the keyword channel says something the
+        # subject-area sweep cannot. Carry it to whichever record survives, or
+        # the signal dies in the merge that produced it.
+        if other.extra.get("keyword_match"):
+            primary.extra["keyword_match"] = True
 
     primary.also_in = [
         {
@@ -280,9 +320,18 @@ def deduplicate(
         for i in range(len(papers)):
             group_sizes[union.find(i)] += 1
 
-        for i, paper in enumerate(papers):
+        # Spend the budget where it can actually pay off. Without this the
+        # order is arbitrary and a set dominated by fresh preprints burns every
+        # request on records that cannot have a journal counterpart yet.
+        candidates = sorted(
+            (i for i in range(len(papers)) if normalise_doi(papers[i].doi)),
+            key=lambda i: _crossref_priority(papers[i]),
+        )
+
+        for i in candidates:
+            paper = papers[i]
             doi = normalise_doi(paper.doi)
-            if not doi or group_sizes[union.find(i)] > 1:
+            if group_sizes[union.find(i)] > 1:
                 continue
             if stats.crossref_lookups >= max_crossref_lookups:
                 stats.crossref_skipped += 1

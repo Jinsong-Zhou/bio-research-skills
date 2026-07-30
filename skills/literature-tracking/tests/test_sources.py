@@ -9,7 +9,7 @@ from datetime import date, timedelta
 from xml.etree import ElementTree as ET
 
 import pytest
-from sources import arxiv, biorxiv, pubmed
+from sources import arxiv, biorxiv, europepmc, pubmed
 
 # arXiv's HTTP-200 error document, verbatim in shape.
 ARXIV_ERROR_FEED = """<?xml version="1.0" encoding="UTF-8"?>
@@ -336,6 +336,89 @@ class TestPubmedArticles:
         paper = pubmed._parse_article(article)
         assert paper.published_date == date(2026, 4, 13)
         assert paper.extra["entrez_date"] == "2026-07-28"
+
+
+class TestEuropePmcQuery:
+    def test_the_query_is_scoped_to_preprints_and_the_window(self):
+        query = europepmc.build_query(
+            ["cryo-EM", "membrane transporter"], date(2026, 7, 23), date(2026, 7, 30)
+        )
+        assert query.startswith('(SRC:"PPR")')
+        assert 'PUBLISHER:"bioRxiv" OR PUBLISHER:"medRxiv"' in query
+        assert "FIRST_PDATE:[2026-07-23 TO 2026-07-30]" in query
+
+    @pytest.mark.parametrize(
+        ("keyword", "expected"),
+        [
+            ("CRISPR (Cas9)", '"CRISPR Cas9"'),
+            ('say "hello"', '"say hello"'),
+            ("a:b", '"a b"'),
+            ("wild*card", '"wild card"'),
+        ],
+    )
+    def test_query_syntax_is_stripped_from_keywords(self, keyword, expected):
+        """Unbalanced syntax makes Europe PMC drop clauses and answer 200 anyway."""
+        assert europepmc._escape(keyword) == expected
+
+    def test_a_rewritten_query_is_an_error_not_a_result(self):
+        payload = {"request": {"queryString": '(SRC:"PPR")'}}
+        with pytest.raises(europepmc.EuropePmcQueryError, match="rewrote the query"):
+            europepmc._check_query_echo(payload, '(SRC:"PPR") AND ("cryo-EM")')
+
+    def test_matching_echo_passes(self):
+        sent = '(SRC:"PPR") AND ("cryo-EM")'
+        europepmc._check_query_echo({"request": {"queryString": sent}}, sent)
+
+    def test_keywords_are_required(self):
+        with pytest.raises(ValueError, match="needs keywords"):
+            europepmc.build_query([], date(2026, 7, 1), date(2026, 7, 8))
+
+    def test_records_are_flagged_as_keyword_matches(self):
+        paper = europepmc._to_paper(
+            {
+                "id": "PPR1276052",
+                "doi": "10.64898/2026.07.06.736854",
+                "title": "Narrow-beam geometry improves\n  cryo-EM",
+                "authorString": "Matinyan S, Filipcik P.",
+                "abstractText": "We do things.",
+                "firstPublicationDate": "2026-07-08",
+                "bookOrReportDetails": {"publisher": "bioRxiv"},
+            }
+        )
+        assert paper.extra["keyword_match"] is True
+        assert paper.extra["preprint_server"] == "biorxiv"
+        assert paper.title == "Narrow-beam geometry improves cryo-EM"
+        assert paper.authors == ["Matinyan S", "Filipcik P"]
+        assert paper.published_date == date(2026, 7, 8)
+        assert paper.url.endswith("10.64898/2026.07.06.736854")
+
+    def test_authorlist_wins_over_the_flattened_string(self):
+        paper = europepmc._to_paper(
+            {
+                "id": "PPR1",
+                "title": "T",
+                "authorString": "Ignore M.",
+                "authorList": {"author": [{"fullName": "Okafor Ada"}]},
+                "firstPublicationDate": "2026-07-08",
+            }
+        )
+        assert paper.authors == ["Okafor Ada"]
+
+    def test_a_repeated_cursor_terminates_paging(self, monkeypatch):
+        """nextCursorMark stops advancing at the end; looping on it never exits."""
+        calls = []
+
+        def fetch(url, params=None, **kwargs):
+            calls.append(params["cursorMark"])
+            return {
+                "request": {"queryString": params["query"]},
+                "resultList": {"result": [{"id": f"PPR{len(calls)}", "title": "T"}]},
+                "nextCursorMark": "SAME",
+            }
+
+        monkeypatch.setattr(europepmc, "fetch_json", fetch)
+        europepmc.search(keywords=["x"], since=date(2026, 7, 1), until=date(2026, 7, 8))
+        assert len(calls) == 2, f"paged forever on a static cursor: {calls}"
 
 
 @pytest.mark.live

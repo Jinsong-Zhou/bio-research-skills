@@ -49,9 +49,18 @@ models**, and a query that suits one silently misbehaves on another:
 | arXiv | yes | yes | `cat:q-bio.*` |
 | bioRxiv / medRxiv | **none** | yes | subject area, **validated** |
 | PubMed | yes, with field tags | yes | via MeSH in the term |
+| Europe PMC | yes — over the same preprints | yes | by publisher |
 
-So: send **keywords** to arXiv and PubMed, send **subject areas** to
-bioRxiv/medRxiv, and let the ranking in step 6 do the narrowing there.
+So: send **keywords** to arXiv, PubMed and Europe PMC; send **subject areas**
+to bioRxiv/medRxiv; let the ranking in step 6 narrow the rest.
+
+**Europe PMC is the keyword channel onto the preprint servers.** bioRxiv has no
+keyword search, so a subject-area sweep is mostly noise; Europe PMC indexes the
+same preprints and *does* search full text. It only covers ~70% of them and
+lags a day, so it supplements the direct fetch rather than replacing it — but
+records carry the same DOI, so the two views merge, and anything reached
+through the keyword channel comes out flagged `extra.keyword_match`. Use that
+flag to decide what to read first; it never removes anything from the list.
 
 Pick bioRxiv areas from the profile, not from habit. `biochemistry`,
 `biophysics` and `molecular biology` suit structural work; add
@@ -85,9 +94,14 @@ python3 scripts/track.py \
 Write the JSON outside the skill directory so runs never dirty the repo.
 
 Useful flags: `--until` for a closed window, `--pubmed-term` for a raw PubMed
-query with field tags, `--medrxiv-categories` for clinical work,
-`--max-crossref-lookups` to raise the dedup tier-2 budget, `--no-crossref` to
-skip that tier entirely. `--help` lists everything.
+query with field tags, `--medrxiv-categories` for clinical work, `--crossref
+on|off` to override the Crossref dedup rule. `--help` lists everything.
+
+That rule is off by default for short windows, and the run says so. It merges a
+preprint with the journal article it became — which only helps if both fall
+inside the same query, and they are usually months apart. Over a measured
+7-day window it cost 60 lookups and merged nothing. Turn it on for retrospective
+sweeps of 60+ days, where both versions can genuinely co-occur.
 
 Sizing: `--max-per-source 200` over 7 days is a good starting point. It is
 **split evenly across bioRxiv subject areas**, so four areas get 50 each — if
@@ -126,12 +140,27 @@ present an April paper under a "this week" heading without saying which is which
 
 ### 6. Rank against the profile — this is your job
 
-A 200-paper report is roughly 250 KB; do not read it whole. Extract titles
-first, shortlist on those, then pull abstracts only for the shortlist:
+A 200-paper report is roughly 250 KB; do not read it whole. Start with the
+records the keyword channel flagged, then sweep the rest by title:
 
 ```bash
-python3 -c "import json;[print(i,p['source'],p['title']) for i,p in enumerate(json.load(open('/tmp/papers.json'))['papers'])]"
+# Keyword-channel hits first — highest prior, usually a handful
+python3 -c "
+import json; d=json.load(open('/tmp/papers.json'))
+for p in d['papers']:
+    if p['extra'].get('keyword_match'): print('★', p['source'], p['title'])
+"
+# Then everything else, titles only
+python3 -c "
+import json; d=json.load(open('/tmp/papers.json'))
+for i,p in enumerate(d['papers']):
+    if not p['extra'].get('keyword_match'): print(i, p['source'], p['title'])
+"
 ```
+
+The flag is a prior, not a filter. Subject-area records without it still
+matter — the papers a keyword alert ranks lowest and a human ranks highest
+live there, which is the whole reason ranking is your job and not a `grep`.
 
 Then judge each shortlisted paper on title and abstract:
 

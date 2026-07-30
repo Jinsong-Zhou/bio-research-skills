@@ -172,6 +172,75 @@ class TestTiers:
         assert stats.crossref_lookups == 0
 
 
+class TestCrossrefBudget:
+    """216 lookups once bought zero merges. Spend the budget where it can pay."""
+
+    def test_journal_records_are_looked_up_before_fresh_preprints(self):
+        fresh = paper("biorxiv", "10.64898/new", "t")
+        fresh.extra["version"] = "1"
+        revised = paper("biorxiv", "10.64898/rev", "t")
+        revised.extra["version"] = "3"
+        journal = paper("pubmed", "10.1016/j", "t")
+
+        ranked = sorted([fresh, revised, journal], key=dedup._crossref_priority)
+        assert [p.source for p in ranked] == ["pubmed", "biorxiv", "biorxiv"]
+        assert ranked[1].extra["version"] == "3", "revisions outrank first versions"
+
+    def test_arxiv_version_is_read_from_the_id_suffix(self):
+        v1 = paper("arxiv", "10.48550/a", "t")
+        v1.extra["arxiv_id_versioned"] = "2601.01234v1"
+        v2 = paper("arxiv", "10.48550/b", "t")
+        v2.extra["arxiv_id_versioned"] = "2601.05678v2"
+        assert dedup._crossref_priority(v1) == 2
+        assert dedup._crossref_priority(v2) == 1
+
+    def test_a_tight_budget_is_spent_on_the_best_candidates(self, monkeypatch):
+        looked_up = []
+        monkeypatch.setattr(
+            dedup, "_crossref_counterpart", lambda doi: looked_up.append(doi) or ""
+        )
+        fresh = [paper("biorxiv", f"10.64898/{i}", f"Fresh preprint number {i}") for i in range(5)]
+        for p in fresh:
+            p.extra["version"] = "1"
+        journal = paper("pubmed", "10.1016/j.cell.1", "A journal article about something")
+
+        _, stats = dedup.deduplicate([*fresh, journal], max_crossref_lookups=1)
+
+        assert looked_up == ["10.1016/j.cell.1"], "the single request went to a fresh preprint"
+        assert stats.crossref_skipped == 5
+
+    def test_a_large_budget_still_reaches_everything(self, monkeypatch):
+        """Ordering defers low-yield lookups; it must not exclude them."""
+        monkeypatch.setattr(dedup, "_crossref_counterpart", lambda doi: "")
+        fresh = paper("biorxiv", "10.64898/x", "A fresh preprint posted this week")
+        fresh.extra["version"] = "1"
+        _, stats = dedup.deduplicate(
+            [fresh, paper("pubmed", "10.1016/y", "An unrelated journal article")],
+            max_crossref_lookups=100,
+        )
+        assert stats.crossref_lookups == 2
+        assert stats.crossref_skipped == 0
+
+
+class TestKeywordSignal:
+    def test_the_keyword_flag_survives_a_merge(self):
+        """It arrives on the Europe PMC record but the direct record wins."""
+        title = "Recovery of a minor cryo-EM particle population"
+        direct = paper("biorxiv", "10.64898/x", title)
+        via_keywords = paper("europepmc", "10.64898/x", title)
+        via_keywords.extra["keyword_match"] = True
+
+        merged, _ = deduplicate_offline([direct, via_keywords])
+
+        assert len(merged) == 1
+        assert merged[0].source == "biorxiv", "the direct record is richer"
+        assert merged[0].extra["keyword_match"] is True, "the signal must not die in the merge"
+
+    def test_records_without_the_flag_stay_unflagged(self):
+        merged, _ = deduplicate_offline([paper("biorxiv", "10.64898/y", "Some other preprint")])
+        assert "keyword_match" not in merged[0].extra
+
+
 class TestGuards:
     def test_short_titles_never_fingerprint_match(self):
         merged, _ = deduplicate_offline(
