@@ -30,6 +30,32 @@ category or date at all, and fails silently when you try.
 **Guard:** `arxiv._check_for_error_entry()` raises `ArxivQueryError` on a
 single-entry feed titled `Error`, surfacing the reason from its `<summary>`.
 
+> **Re-measured 2026-07-30: arXiv now uses status codes for this.** The same
+> `all:`-wrapped query returns **HTTP 400**, and an unbalanced bracket returns
+> **HTTP 500**; both land in `FetchError` rather than the guard. The guard is
+> kept as belt-and-braces — it costs one `findall` per fetch, and this API has
+> changed shape before — but it is no longer the thing catching this case.
+> `tests/test_sources.py::TestLiveBehaviour` asserts the *invariant* (a
+> malformed structured query must be refused **somehow**) rather than the
+> mechanism, so it will fail if arXiv ever starts answering one with plausible
+> unfiltered results.
+
+### An unknown field prefix returns 200 with zero results
+
+Measured 2026-07-30 — the silent failure that replaced the one above:
+
+| `search_query` | HTTP | `totalResults` | `Error` entry |
+|---|---|---|---|
+| `all:cat:q-bio.BM` | **400** | — | — |
+| `cat:q-bio.BM AND submittedDate:[… ` (unbalanced) | **500** | — | — |
+| `nosuchfield:xyz` | **200** | **0** | no |
+| `cat:q-bio.BM` | 200 | 6819 | no |
+
+A misspelled field is therefore indistinguishable from a quiet week. There is
+no guard, because `build_query` only ever emits `cat:`, `all:` and
+`submittedDate:` — but anything adding a new field must check that it returns
+results, not merely that it returns 200.
+
 ### Other notes
 
 - Timestamps in `submittedDate` are `YYYYMMDDHHMM`, UTC, inclusive on both ends.
@@ -97,10 +123,16 @@ Assuming 100 is doubly wrong: a `len(batch) < 100` stop condition fires on the
 first page, and advancing the cursor by 100 skips 70 records per step.
 **Advance by `len(batch)` and stop against `total`.**
 
-> This exact bug shipped in v0.1 of this skill. The paragraph warning about it
-> was already here; the code used the wrong constant. Constructed tests passed
-> because the fixture returned whatever page size the test author assumed.
-> Verify page size against the live API, not against your own mock.
+> This exact bug was written, and survived a green test suite, while the
+> paragraph warning about it was already in this file. The fixture returned
+> whatever page size its author assumed, so the assertion and the mock agreed
+> with each other and neither agreed with the API.
+>
+> Fixing the instance is not enough — a constant that happens to equal today's
+> page size passes just as well. `tests/test_sources.py` therefore serves
+> **ragged** batches (30, 17, 30, 8, 25) and derives its assertion from the
+> stub's own log of what it returned, so no literal can satisfy it. Verify page
+> size against the live API, never against your own mock.
 
 ### Records come back oldest-first
 
@@ -124,7 +156,7 @@ detect preprints by DOI prefix.
 ### Preprint → journal links come free
 
 Each record has a `published` field holding the journal DOI once one exists
-(the literal string `NA` until then). This is dedup tier 1 and costs nothing.
+(the literal string `NA` until then). This is dedup rule 2 and costs nothing.
 `/pubs/{server}/{start}/{end}/{cursor}` gives the same mapping in bulk, keyed by
 *published* date rather than preprint date.
 
@@ -171,13 +203,22 @@ a digest can say which it means rather than listing an April paper under a
 taking the last token yields `ME`, the initials.
 
 This is not cosmetic. Dedup buckets on `(title fingerprint, surname)`; keying
-99.7% of PubMed records on their initials puts them in different buckets from
-the matching preprint, and the tier never fires. That bug also shipped in v0.1.
+PubMed records on their initials puts them in different buckets from the
+matching preprint, and the rule never fires. On a sampled run essentially every
+PubMed record was affected.
+
+The inverse matters too: when the surname comes out **empty** the key degenerates
+to the title alone, which pools unrelated records sharing a boilerplate title.
+`dedup.py` skips the bucket entirely in that case rather than merging on half a
+key.
 
 ### Rate limits
 
 3 requests/second anonymously, 10 with `NCBI_API_KEY` set. Exceeding it earns a
-block, not a 429. `_http._HOST_INTERVAL` paces to the anonymous limit.
+block, not a 429. `_http._HOST_INTERVAL` paces to the anonymous limit **whether
+or not a key is set** — deliberately, since the key's value here is headroom
+against a ban rather than throughput. Raise the interval too if you ever need
+the extra speed; setting the key alone changes nothing about how fast this runs.
 
 ### Other notes
 
@@ -251,10 +292,17 @@ Set `BIO_RESEARCH_CONTACT` to your address.
 
 ### It costs ~1.4s a lookup, so spend the budget deliberately
 
-A measured run issued **216 lookups for zero merges**. The reason is
-structural: a lookup only merges when the counterpart is already in the result
-set, and a preprint posted this week cannot have a journal version yet — its
-journal article would have to predate it.
+A measured run with the budget raised to 250 issued **216 lookups for zero
+merges** (the shipped default is 60, so reproducing that figure needs
+`--max-crossref-lookups`). The reason is structural: a lookup only merges when
+the counterpart is already in the result set, and a preprint posted this week
+cannot have a journal version yet — its journal article would have to predate it.
+
+The budget is charged on the **attempt**, not the success. Crossref 404s every
+arXiv DOI (those are DataCite, not Crossref) and 503s under load; charging only
+for successes made `--max-crossref-lookups` no ceiling at all, and an outage
+would walk every candidate at three retries apiece while `crossref_skipped`
+stayed at zero.
 
 `dedup.py` therefore runs Crossref **last**, after the free rules have taken
 what they can, and orders the remaining candidates by expected payoff:

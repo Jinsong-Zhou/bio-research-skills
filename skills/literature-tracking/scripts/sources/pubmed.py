@@ -15,11 +15,15 @@ Two things worth knowing:
   ``extra["entrez_date"]`` is the one that bounded the search — so a digest can
   say which it means instead of quietly contradicting its own window.
 
-Set ``NCBI_API_KEY`` to raise the rate limit from 3 to 10 requests/second.
+``NCBI_API_KEY`` is optional. It raises NCBI's *server-side* limit from 3 to 10
+requests/second, but ``_http._HOST_INTERVAL`` paces this client to the
+anonymous 3/s either way — so the key buys headroom against a ban, not speed.
+Raise the interval too if you ever need the throughput.
 """
 
 from __future__ import annotations
 
+import calendar
 import os
 from datetime import date
 from xml.etree import ElementTree as ET
@@ -72,8 +76,11 @@ def _date_from(node: ET.Element | None) -> date | None:
     try:
         return date(year, month, day)
     except ValueError:
-        # e.g. "31" in a 30-day month; clamp rather than drop the record.
-        return date(year, month, 1)
+        # e.g. "31" in a 30-day month. Clamp to the last real day rather than
+        # dropping the record — falling back to the 1st would shift the date
+        # backwards by most of a month and can push it outside the window.
+        last = calendar.monthrange(year, month)[1]
+        return date(year, month, min(day, last))
 
 
 def _entrez_date(article: ET.Element) -> date | None:
@@ -96,6 +103,26 @@ def _best_date(article: ET.Element) -> date | None:
 
     # 3. Journal PubDate — frequently year-only, so it lands on 1 January.
     return _date_from(article.find(".//Journal/JournalIssue/PubDate"))
+
+
+def _entrez_range(papers: list[Paper]) -> tuple[date, date] | None:
+    """Span of the dates ``esearch`` actually filtered on.
+
+    Reporting the publication-date span instead would answer a different
+    question than the one the window asked: a seven-day Entrez window routinely
+    holds papers published months earlier, so that span reads as though the
+    sweep reached far outside its own window.
+    """
+    seen: list[date] = []
+    for paper in papers:
+        raw = str(paper.extra.get("entrez_date", ""))
+        if not raw:
+            continue
+        try:
+            seen.append(date.fromisoformat(raw))
+        except ValueError:
+            continue
+    return (min(seen), max(seen)) if seen else None
 
 
 def _text(node: ET.Element | None) -> str:
@@ -230,7 +257,7 @@ def search(
 
     ids, available = _esearch(term, since, until, max_results)
     if not ids:
-        return SearchResult([], available)
+        return SearchResult([], available, date_axis="entrez_date")
 
     papers: list[Paper] = []
     for start in range(0, len(ids), FETCH_BATCH):
@@ -243,9 +270,30 @@ def search(
                 **_auth_params(),
             },
         )
-        for article in root.findall(".//PubmedArticle"):
+        # PubmedBookArticle is a sibling element, not a PubmedArticle — a
+        # findall on the latter alone drops book chapters without a word.
+        for article in root.findall(".//PubmedArticle") + root.findall(".//PubmedBookArticle"):
             if (paper := _parse_article(article)) is not None:
                 papers.append(paper)
 
     papers.sort(key=lambda p: (p.published_date or date.min), reverse=True)
-    return SearchResult(papers, available)
+
+    # esearch's count is the number of *matches*; papers is what survived
+    # fetching and parsing. Handing the raw count to SearchResult reports every
+    # unparseable record as truncation, and tells the caller to raise a limit
+    # that will change nothing. Reconcile here, and say what was lost.
+    notes: list[str] = []
+    swept_everything = available is None or len(ids) >= available
+    dropped = len(ids) - len(papers)
+    if dropped > 0:
+        notes.append(
+            f"{dropped} of {len(ids)} records fetched but not parsed "
+            f"(no PMID, no title, or an unrecognised record type)"
+        )
+    return SearchResult(
+        papers,
+        len(papers) if swept_everything else available,
+        date_axis="entrez_date",
+        axis_range=_entrez_range(papers),
+        notes=notes,
+    )

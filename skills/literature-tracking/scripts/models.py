@@ -35,9 +35,14 @@ class Paper:
     citations: int = 0
 
     #: Records from other sources judged to be the same work, in the shape
-    #: ``{"source": ..., "doi": ..., "url": ..., "paper_id": ...}``.
+    #: ``{"source", "doi", "url", "paper_id", "published_date", "title"}``.
+    #: ``title`` is carried so a wrong merge is visible in the output rather
+    #: than hidden behind whichever record won the primary slot.
     also_in: list[dict[str, str]] = field(default_factory=list)
-    #: Which dedup rule merged ``also_in`` in. Empty when nothing was merged.
+    #: Which dedup rules merged ``also_in`` in, joined by ``+`` when more than
+    #: one agreed, e.g. ``"exact-doi+title-fingerprint"``. Empty when nothing
+    #: was merged. Match on membership, never equality:
+    #: ``"exact-doi" in paper.merge_reason.split("+")``.
     merge_reason: str = ""
     #: Source-specific leftovers (bioRxiv ``published``, PubMed ``pmid``, ...).
     extra: dict[str, Any] = field(default_factory=dict)
@@ -65,20 +70,59 @@ class SearchResult:
     """
 
     papers: list[Paper]
-    #: Records matching the query in the window, per the API's own count.
-    #: ``None`` when the API does not report one.
+    #: Records matching the query in the window, counted the same way
+    #: ``papers`` is. ``None`` when the API does not report a usable count —
+    #: which is *not* the same as zero, and must not be collapsed into it.
+    #: A source that post-processes its rows (bioRxiv collapses versions) has
+    #: to reconcile the API's count with what survived, or a complete sweep
+    #: reports itself truncated.
     available: int | None = None
+    #: Which date field the *search* was bounded on. PubMed searches on Entrez
+    #: date and reports publication dates, so its records legitimately fall
+    #: outside the requested window and ``covered_range`` must not be read as
+    #: "the part of the window we reached".
+    date_axis: str = "published_date"
+    #: Range of ``date_axis`` across the returned records, when that field is
+    #: not ``published_date``. Sources bounded on their own axis set this.
+    axis_range: tuple[date, date] | None = None
+    #: Anything the adapter had to do quietly — records it could not parse,
+    #: fields it fell back on. Without these a dropped record is reported as
+    #: truncation, and the caller is told to raise a limit that will not help.
+    notes: list[str] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.papers)
 
     @property
+    def coverage(self) -> str:
+        """``complete`` | ``truncated`` | ``unknown``.
+
+        Three states, because "the API did not tell us how much exists" is a
+        real answer and reporting it as ``complete`` is how a half-swept
+        window gets written up as a finished one.
+        """
+        if self.available is None:
+            return "unknown"
+        return "truncated" if self.available > len(self.papers) else "complete"
+
+    @property
     def truncated(self) -> bool:
-        return self.available is not None and self.available > len(self.papers)
+        """True only when we *know* records were left behind.
+
+        Unknown coverage is deliberately not truthy here — check ``coverage``
+        when the distinction matters.
+        """
+        return self.coverage == "truncated"
 
     @property
     def covered_range(self) -> tuple[date, date] | None:
-        """Earliest and latest date actually returned, for spotting skew."""
+        """Earliest and latest ``date_axis`` value returned, for spotting skew.
+
+        Falls back to publication dates, which is the search axis for every
+        source except PubMed.
+        """
+        if self.axis_range:
+            return self.axis_range
         dates = [p.published_date for p in self.papers if p.published_date]
         return (min(dates), max(dates)) if dates else None
 

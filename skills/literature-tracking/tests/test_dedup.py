@@ -318,3 +318,233 @@ class TestMergedRecord:
 
 def deduplicate_offline(papers):
     return dedup.deduplicate(papers, use_crossref=False)
+
+
+class TestMisMergeGuards:
+    """Reporting two different papers as one is the worst thing this can do.
+
+    Each guard below closes a path that produced a real false merge when the
+    dedup rules were audited: an unvalidated third-party DOI, a bucket key with
+    half of it missing, and a year window that only checked adjacent hops.
+    """
+
+    def test_a_garbled_published_field_cannot_merge_across_a_decade(self):
+        """Rule 2 acts on one third-party string with nothing corroborating it."""
+        preprint = paper("biorxiv", "10.64898/x", "A 2026 cryo-EM study of transporters",
+                         year=2026, published_doi="10.1016/old")
+        unrelated = paper("pubmed", "10.1016/old", "Soil microbiome diversity in 2011",
+                          year=2011, authors=("Okafor, A.",))
+
+        merged, stats = dedup.deduplicate([preprint, unrelated], use_crossref=False)
+
+        assert len(merged) == 2, "fifteen years apart is data corruption, not a match"
+        assert stats.merges_by_tier == {}
+
+    def test_a_plausible_publication_gap_still_merges(self):
+        """The bound must not be so tight it rejects a slow journal."""
+        preprint = paper("biorxiv", "10.64898/y", LONG_TITLE, year=2022,
+                         published_doi="10.1016/j.cell.9")
+        journal = paper("pubmed", "10.1016/j.cell.9", LONG_TITLE, year=2026)
+
+        merged, stats = dedup.deduplicate([preprint, journal], use_crossref=False)
+
+        assert len(merged) == 1
+        assert "biorxiv-published" in merged[0].merge_reason
+
+    def test_author_less_records_do_not_pool_on_a_shared_boilerplate_title(self):
+        """With no surname the bucket key is the title alone.
+
+        Conference abstract collections share one long title across unrelated
+        records, and clear MIN_TITLE_CHARS comfortably.
+        """
+        shared = "Abstracts of the Annual Meeting of the Society for Neuroscience"
+        one = paper("biorxiv", "10.64898/a1", shared, authors=())
+        two = paper("biorxiv", "10.64898/a2", shared, authors=())
+
+        merged, _ = dedup.deduplicate([one, two], use_crossref=False)
+
+        assert len(merged) == 2
+
+    def test_the_year_window_bounds_the_group_not_each_hop(self):
+        """Union is transitive: 2019-2022 and 2022-2025 must not chain.
+
+        Each hop clears a 3-year window while the endpoints are six years
+        apart — an annually reissued database paper is exactly this shape.
+        """
+        editions = [
+            paper("biorxiv", f"10.64898/e{y}", LONG_TITLE, year=y) for y in (2019, 2022, 2025)
+        ]
+
+        merged, _ = dedup.deduplicate(editions, use_crossref=False, year_window=3)
+
+        spans = [
+            max(p.published_date.year for p in group) - min(p.published_date.year for p in group)
+            for group in [[m] for m in merged]
+        ]
+        assert all(span <= 3 for span in spans)
+        assert len(merged) >= 2, "2019 and 2025 ended up in one group"
+
+    def test_a_merge_is_auditable_from_the_output_alone(self):
+        """also_in carries the losing record's title, or a bad merge is invisible."""
+        preprint = paper("biorxiv", "10.64898/z", LONG_TITLE)
+        journal = paper("pubmed", "10.1016/j.cell.7", LONG_TITLE)
+
+        merged, _ = dedup.deduplicate([preprint, journal], use_crossref=False)
+
+        (survivor,) = merged
+        assert survivor.also_in[0]["title"] == LONG_TITLE
+        assert survivor.also_in[0]["source"] == "biorxiv"
+
+
+class TestCrossrefPayloadParsing:
+    """_crossref_counterpart's JSON walk, which every other test stubs away.
+
+    A typo in one of these keys disables rule 4 entirely: exit 0, empty
+    `errors`, well-formed JSON, no merges.
+    """
+
+    def _payload(self, monkeypatch, payload):
+        monkeypatch.setattr(dedup, "fetch_json", lambda url, *a, **k: payload)
+
+    def test_the_preprint_side_relation_is_read(self, monkeypatch):
+        self._payload(monkeypatch, {
+            "message": {"relation": {"is-preprint-of": [{"id-type": "doi", "id": "10.1016/x"}]}}
+        })
+        assert dedup._crossref_counterpart("10.64898/a") == "10.1016/x"
+
+    def test_the_journal_side_relation_is_read(self, monkeypatch):
+        self._payload(monkeypatch, {
+            "message": {"relation": {"has-preprint": [{"id-type": "doi", "id": "10.64898/A"}]}}
+        })
+        assert dedup._crossref_counterpart("10.1016/x") == "10.64898/a", "and normalised"
+
+    def test_a_non_doi_identifier_is_ignored(self, monkeypatch):
+        self._payload(monkeypatch, {
+            "message": {"relation": {"is-preprint-of": [{"id-type": "uri", "id": "http://x"}]}}
+        })
+        assert dedup._crossref_counterpart("10.64898/a") == ""
+
+    @pytest.mark.parametrize("payload", [
+        {},
+        {"message": None},
+        {"message": {"relation": None}},
+        {"message": {"relation": {"is-preprint-of": "not-a-list"}}},
+        {"message": {"relation": {"is-preprint-of": ["not-a-dict"]}}},
+        [1, 2, 3],
+    ], ids=["empty", "null-message", "null-relation", "string-entries", "string-entry", "list"])
+    def test_a_malformed_payload_yields_nothing_rather_than_killing_the_run(
+        self, monkeypatch, payload
+    ):
+        """`.get(k, {})` returns the default only when the key is *absent*.
+
+        A present-but-null value hands back None and the next .get raises —
+        which used to abort a run that had already spent minutes fetching, with
+        no JSON on stdout at all.
+        """
+        self._payload(monkeypatch, payload)
+        assert dedup._crossref_counterpart("10.64898/a") == ""
+
+    def test_the_doi_is_escaped_into_the_url(self, monkeypatch):
+        """Legacy Wiley DOIs carry <, > and ;. A # or ? would truncate the path."""
+        seen = {}
+        monkeypatch.setattr(
+            dedup, "fetch_json", lambda url, *a, **k: seen.update(url=url) or {"message": {}}
+        )
+        dedup._crossref_counterpart("10.1002/(sici)1097-0258(19980815)17:15<1661::aid-sim968>3.0.co;2-2")
+        assert "<" not in seen["url"] and ">" not in seen["url"]
+        assert seen["url"].startswith(dedup.CROSSREF_URL + "/")
+
+
+class TestCrossrefBudgetIsARealCeiling:
+    def test_failed_lookups_consume_the_budget(self, monkeypatch):
+        """Charging only for successes turns the ceiling into no ceiling.
+
+        Crossref 404s every arXiv DOI (those are DataCite) and 503s under load,
+        so an outage would walk every candidate at three retries apiece while
+        `crossref_skipped` stayed at 0.
+        """
+        attempts = []
+
+        def always_fails(doi):
+            attempts.append(doi)
+            raise dedup.FetchError("Crossref is down")
+
+        monkeypatch.setattr(dedup, "_crossref_counterpart", always_fails)
+        papers = [paper("biorxiv", f"10.64898/{i}", f"Study number {i} of many") for i in range(20)]
+        papers.append(paper("pubmed", "10.1016/j.cell.1", "An unrelated journal article"))
+
+        _, stats = dedup.deduplicate(papers, max_crossref_lookups=5)
+
+        assert len(attempts) == 5, f"budget of 5 allowed {len(attempts)} requests"
+        assert stats.crossref_lookups == 5
+        assert stats.crossref_failures == 5
+        assert stats.crossref_skipped == 16, "the rest must be reported as skipped, not silent"
+
+    def test_records_merged_mid_loop_are_not_looked_up_again(self, monkeypatch):
+        """A stale group-size snapshot pays twice for one pair."""
+        looked_up = []
+        monkeypatch.setattr(
+            dedup,
+            "_crossref_counterpart",
+            lambda doi: looked_up.append(doi) or ("10.64898/p" if doi == "10.1016/j" else ""),
+        )
+        pair = [
+            paper("pubmed", "10.1016/j", "A journal article about transporters"),
+            paper("biorxiv", "10.64898/p", "A preprint retitled before publication"),
+        ]
+
+        _, stats = dedup.deduplicate(pair, max_crossref_lookups=60)
+
+        assert looked_up == ["10.1016/j"], f"asked about both directions: {looked_up}"
+        assert stats.rule_matches.get("crossref-relation") == 1
+
+
+class TestStatsTellTheTruth:
+    def test_rule_matches_counts_every_agreement_not_just_new_unions(self):
+        """A rule that agrees with a cheaper one still fired.
+
+        SKILL.md tells the reader to judge a rule by rule_matches; merges_by_tier
+        counts only unions it created, so a working rule can read as dead.
+        """
+        both = [
+            paper("biorxiv", "10.64898/same", LONG_TITLE),
+            paper("europepmc", "10.64898/same", LONG_TITLE),
+        ]
+
+        _, stats = dedup.deduplicate(both, use_crossref=False)
+
+        assert stats.merges_by_tier == {"exact-doi": 1}
+        assert stats.rule_matches == {"exact-doi": 1, "title-fingerprint": 1}
+
+    def test_merge_reason_joins_every_rule_that_agreed(self):
+        """The value is a + -joined set; matching it by equality misses this."""
+        both = [
+            paper("biorxiv", "10.64898/same", LONG_TITLE),
+            paper("europepmc", "10.64898/same", LONG_TITLE),
+        ]
+        merged, _ = dedup.deduplicate(both, use_crossref=False)
+        assert merged[0].merge_reason == "exact-doi+title-fingerprint"
+
+    def test_an_unknown_source_is_named_rather_than_silently_demoted(self):
+        odd = paper("chemrxiv", "10.26434/x", "A chemistry preprint with a long title")
+        _, stats = dedup.deduplicate([odd], use_crossref=False)
+        assert stats.unknown_sources == ["chemrxiv"]
+
+
+class TestMergedRecordKeepsWhatMatters:
+    def test_a_dateless_primary_inherits_its_twins_date(self):
+        """PubMed outranks every preprint source but can carry no usable date.
+
+        A <MedlineDate> range like "2026 Jul-Aug" parses to nothing, and without
+        a backfill the merged record sorts to the bottom and shows up dateless
+        while the real date sits in also_in.
+        """
+        journal = paper("pubmed", "10.1016/j.cell.5", LONG_TITLE)
+        journal.published_date = None
+        preprint = paper("biorxiv", "10.64898/w", LONG_TITLE, year=2026)
+
+        merged, _ = dedup.deduplicate([journal, preprint], use_crossref=False)
+
+        (survivor,) = merged
+        assert survivor.source == "pubmed"
+        assert survivor.published_date == date(2026, 6, 1)
