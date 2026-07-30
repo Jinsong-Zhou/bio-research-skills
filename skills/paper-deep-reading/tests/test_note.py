@@ -222,6 +222,68 @@ class TestRendering:
         assert rendered.count("- —") == 2
 
 
+class TestBlocks:
+    """The renderer-agnostic form. Markdown is rendered *from* these, so a
+    Markdown assertion elsewhere does not cover what a Word renderer sees."""
+
+    KNOWN = {
+        "title", "banner", "h1", "h2", "p", "note", "label",
+        "fields", "bullets", "numbered", "table",
+    }
+
+    def test_every_block_has_a_known_type(self):
+        types = {b["type"] for b in note.build_blocks(valid_note())}
+        assert types <= self.KNOWN, f"unknown block types: {types - self.KNOWN}"
+
+    def test_blocks_carry_no_markdown_markup(self):
+        """Emphasis is the block type's job. Markup here would reach Word
+        verbatim as literal asterisks."""
+        import json
+
+        data = valid_note()
+        data["paper"]["fulltext"] = "abstract-only"
+        data["relevance"] = {"status": "no-background-provided", "text": ""}
+        dumped = json.dumps(note.build_blocks(data), ensure_ascii=False)
+        for markup in ("**", "> ", "_No research", "`"):
+            assert markup not in dumped, f"{markup!r} leaked into the blocks form"
+
+    def test_the_claim_table_is_a_table_not_prose(self):
+        table = [b for b in note.build_blocks(valid_note()) if b["type"] == "table"][0]
+        assert len(table["header"]) == 4
+        assert all(len(row) == 4 for row in table["rows"])
+
+    def test_pipes_are_not_escaped_in_blocks(self):
+        """Escaping is Markdown's problem; a Word cell holds the text verbatim."""
+        data = valid_note()
+        data["assessment"]["claims"][0]["claim"] = "accuracy | precision"
+        table = [b for b in note.build_blocks(data) if b["type"] == "table"][0]
+        assert table["rows"][0][0] == "accuracy | precision"
+
+    def test_the_banner_appears_only_without_full_text(self):
+        assert not [b for b in note.build_blocks(valid_note()) if b["type"] == "banner"]
+        data = valid_note()
+        data["paper"]["fulltext"] = "abstract-only"
+        banner = [b for b in note.build_blocks(data) if b["type"] == "banner"][0]
+        assert banner["lead"] and banner["text"]
+
+    def test_an_empty_limitation_list_still_produces_a_visible_row(self):
+        data = valid_note()
+        data["assessment"]["limitations"] = {"acknowledged": [], "unstated": []}
+        bullets = [b for b in note.build_blocks(data) if b["type"] == "bullets"]
+        assert [b["items"] for b in bullets] == [["—"], ["—"]]
+
+    def test_headings_follow_the_note_language(self):
+        data = valid_note()
+        data["language"] = "zh"
+        headings = [b["text"] for b in note.build_blocks(data) if b["type"] == "h1"]
+        assert "第二部分 — 评价" in headings
+
+    def test_cost_is_a_labelled_paragraph_not_a_lone_bullet(self):
+        blocks = note.build_blocks(valid_note())
+        leads = [b.get("lead") for b in blocks if b["type"] == "p"]
+        assert "Cost to act on it" in leads
+
+
 class TestCli:
     def test_render_refuses_a_broken_note_by_default(self, tmp_path, capsys):
         import json

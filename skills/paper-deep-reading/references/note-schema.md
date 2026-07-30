@@ -95,6 +95,42 @@ background is unknown — see SKILL.md step 2.
 
 ---
 
+## The blocks form
+
+`note.py render --format blocks` emits the same note as a flat list of typed
+blocks. This is what a renderer that is not written in Python consumes — the
+`docx` and `pptx` skills, for instance.
+
+It exists because the two obvious alternatives are both worse. Handing a
+renderer the Markdown means parsing a table back out of pipe characters.
+Handing it the raw note means reimplementing the heading translations in
+whatever language that renderer is written in. Blocks carry the labels already
+resolved, so eleven shapes cover the whole document:
+
+| type | fields | renders as |
+|---|---|---|
+| `title` | `text` | document title |
+| `banner` | `lead`, `text` | shaded, bordered callout — only when `fulltext` is `abstract-only` |
+| `h1` | `text` | section heading |
+| `h2` | `text` | subsection heading |
+| `p` | `text`, optional `lead` | paragraph; `lead` is a bold run before an em dash |
+| `note` | `text` | italic aside — the deliberately-empty relevance section |
+| `label` | `text` | bold standalone line introducing a list |
+| `fields` | `items[{label, value}]` | bulleted label/value pairs |
+| `bullets` | `items[]` | bulleted list |
+| `numbered` | `items[]` | ordered list |
+| `table` | `header[]`, `rows[][]` | the claim table |
+
+**Blocks carry no markup.** No `**bold**`, no `> quote`, no `_italic_` — the
+emphasis is in the block type, and each renderer applies its own. A block whose
+text contains Markdown syntax is a bug in `build_blocks`, not something for the
+renderer to strip.
+
+Empty lists still render: `bullets` with no items becomes `["—"]`, so an empty
+limitations section is visibly empty rather than absent.
+
+---
+
 ## Worked fragment
 
 ```json

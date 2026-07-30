@@ -177,31 +177,48 @@ corresponds to a way a note reads as more grounded than it is.
 
 ### 8. Deliver as Word
 
-The default deliverable is a `.docx`. Use the **`docx` skill** from
-`anthropics/skills`, giving it the Markdown from step 7:
+The default deliverable is a `.docx`. Render the note to **blocks** and hand
+those to the **`docx` skill** from `anthropics/skills`:
+
+```bash
+python3 scripts/note.py render /tmp/note.json --format blocks -o /tmp/blocks.json
+```
 
 ```
 /plugin marketplace add anthropics/skills
 /plugin install document-skills@anthropic-agent-skills
 ```
 
+Blocks, not the Markdown. Parsing a table back out of pipe characters is lossy,
+and the headings are already translated into the note's language — a renderer
+only has to know eleven shapes: `title` `banner` `h1` `h2` `p` `note` `label`
+`fields` `bullets` `numbered` `table`. `references/note-schema.md` lists what
+each carries.
+
 That skill is licensed separately from this one — © Anthropic, and its terms
-run through the user's agreement with Anthropic — and it needs Node.js plus the
-`docx` npm package. It is not vendored here and cannot be.
+run through the user's agreement with Anthropic. It is not vendored here and
+cannot be. (The `docx` npm package it drives is MIT and a different thing.)
 
 **If it is unavailable, deliver `/tmp/note.md` and say why.** A Markdown note in
-hand beats a Word document that never arrived. Do not fall back to writing raw
-`.docx` XML yourself; it is a poor use of the user's time and yields a worse
-document than the Markdown.
+hand beats a Word document that never arrived.
 
-Layout that survives the conversion: the claim table as a real table, the two
-parts as `Heading 1`, each field as `Heading 2`. Keep the abstract-only banner
-if there is one — it is the most important sentence in the document.
+Four layout facts, measured by building the document and looking at it:
+
+- **Table column widths must sum to the content width.** A4 with the default
+  1440 DXA margins leaves **9026**. Set `columnWidths` on the table *and*
+  `width` on every cell, both in DXA — percentages break in Google Docs.
+- **CJK needs an `eastAsia` font.** `font: { name: "Calibri", eastAsia: "PingFang SC" }`
+  on the default run style renders Chinese notes correctly; without it the
+  glyph fallback is the renderer's guess.
+- **Put an empty paragraph after a table**, or an adjacent table merges into it.
+- **The `banner` block is the most important thing on the page** when it is
+  present. Give it shading and a border, not italics — it is the sentence that
+  tells the reader this note was written without the paper.
 
 ### 9. Offer slides, do not assume them
 
 If the note is going to a group meeting, the `pptx` skill from the same plugin
-renders it. **Ask first.** Slides are a different document with different
+renders it — from the same blocks. **Ask first.** Slides are a different document with different
 content — the claim table rarely survives contact with a slide, and the verdict
 usually becomes the first slide rather than the last.
 

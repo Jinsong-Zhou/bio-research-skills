@@ -7,14 +7,16 @@ credits to the paper has to name where in the paper that claim lives, and a
 section it could not honestly fill has to say so rather than quietly read as
 though it were filled.
 
-    python3 note.py template            # the skeleton to fill in
-    python3 note.py validate note.json  # what is missing or ungrounded
-    python3 note.py render note.json    # Markdown, the format that always works
+    python3 note.py template                       # the skeleton to fill in
+    python3 note.py validate note.json             # what is missing or ungrounded
+    python3 note.py render note.json               # Markdown, always available
+    python3 note.py render note.json --format blocks   # for a non-Python renderer
 
-Markdown is the fallback, not the goal. Word and slides are rendered by the
-``docx`` and ``pptx`` skills from ``anthropics/skills``; see SKILL.md. Keeping
-the note itself in JSON is what lets all three exist without one of them being
-the source of truth.
+Word and slides are rendered by the ``docx`` and ``pptx`` skills from
+``anthropics/skills``, which are not written in Python — so ``--format blocks``
+hands them a typed document tree with the headings already in the note's
+language, rather than Markdown they would have to parse a table out of. The
+note stays the source of truth and none of the three renderings owns it.
 """
 
 from __future__ import annotations
@@ -218,11 +220,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "cost": "Cost to act on it",
         "next_steps": "Next steps",
         "relevance": "Relevance to your work",
-        "no_background": "_No research background was provided, so this section is "
-        "left empty rather than guessed at._",
-        "abstract_banner": "> ⚠️ **Abstract only.** No full text was available, so nothing "
-        "below rests on the paper's actual figures, tables or methods. This is a "
-        "summary, not a deep read.",
+        "no_background": "No research background was provided, so this section is "
+        "left empty rather than guessed at.",
+        "banner_lead": "⚠️ Abstract only.",
+        "banner_body": "No full text was available, so nothing below rests on the "
+        "paper's actual figures, tables or methods. This is a summary, not a deep read.",
         "authors": "Authors",
         "venue": "Venue",
         "decision_follow-up": "Worth following up",
@@ -254,9 +256,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "cost": "跟进成本",
         "next_steps": "下一步",
         "relevance": "与你的工作的关联",
-        "no_background": "_未提供研究背景，此节留空，不做编造。_",
-        "abstract_banner": "> ⚠️ **仅有摘要。** 没拿到全文，下面没有任何一句建立在论文实际的"
-        "图表和方法上。这是摘要，不是精读。",
+        "no_background": "未提供研究背景，此节留空，不做编造。",
+        "banner_lead": "⚠️ 仅有摘要。",
+        "banner_body": "没拿到全文，下面没有任何一句建立在论文实际的图表和方法上。"
+        "这是摘要，不是精读。",
         "authors": "作者",
         "venue": "发表于",
         "decision_follow-up": "值得跟进",
@@ -269,91 +272,163 @@ STRINGS: dict[str, dict[str, str]] = {
 }
 
 
-def _cell(value: Any, fallback: str = "—") -> str:
-    """Escape a value for a Markdown table cell."""
+def _text(value: Any, fallback: str = "") -> str:
     text = str(value).strip() if value is not None else ""
-    if not text:
-        return fallback
-    return text.replace("|", "\\|").replace("\n", " ")
+    return text or fallback
 
 
-def render_markdown(note: dict[str, Any]) -> str:
+def build_blocks(note: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn a note into a flat list of typed blocks.
+
+    This is the renderer-agnostic form, and the reason it exists is that the
+    Word and slide renderers are not written in Python. Handing them Markdown
+    would mean parsing a table back out of pipe characters, and handing them
+    the raw note would mean reimplementing the heading translations in every
+    language they are written in. Blocks carry the resolved labels, so a
+    renderer only has to know ten shapes.
+
+    Types: ``title`` ``banner`` ``h1`` ``h2`` ``p`` ``note`` ``label``
+    ``fields`` ``bullets`` ``numbered`` ``table``.
+    """
     lang = note.get("language", "en")
     s = STRINGS.get(lang, STRINGS["en"])
     paper = note.get("paper") or {}
-    lines: list[str] = [f"# {s['title'].format(title=paper.get('title', ''))}", ""]
 
+    blocks: list[dict[str, Any]] = [
+        {"type": "title", "text": s["title"].format(title=paper.get("title", ""))}
+    ]
     if paper.get("fulltext") == "abstract-only":
-        lines += [s["abstract_banner"], ""]
+        blocks.append({"type": "banner", "lead": s["banner_lead"], "text": s["banner_body"]})
 
-    lines += [f"## {s['paper']}", ""]
+    blocks.append({"type": "h1", "text": s["paper"]})
+    fields: list[dict[str, str]] = []
     authors = paper.get("authors") or []
     if authors:
         shown = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
-        lines.append(f"- **{s['authors']}**: {shown}")
+        fields.append({"label": s["authors"], "value": shown})
     for label, key in ((s["venue"], "venue"), ("DOI", "doi"), ("URL", "url")):
         if paper.get(key):
-            lines.append(f"- **{label}**: {paper[key]}")
-    lines.append("")
+            fields.append({"label": label, "value": str(paper[key])})
+    if fields:
+        blocks.append({"type": "fields", "items": fields})
 
     understanding = note.get("understanding") or {}
-    lines += [f"## {s['part1']}", ""]
+    blocks.append({"type": "h1", "text": s["part1"]})
     for field in UNDERSTANDING_FIELDS:
-        lines += [f"### {s[field]}", "", str(understanding.get(field, "")).strip(), ""]
+        blocks.append({"type": "h2", "text": s[field]})
+        blocks.append({"type": "p", "text": _text(understanding.get(field))})
 
-    lines += _render_assessment(note.get("assessment") or {}, s)
-    lines += _render_relevance(note.get("relevance") or {}, s)
-    return "\n".join(lines).rstrip() + "\n"
+    blocks += _assessment_blocks(note.get("assessment") or {}, s)
+    blocks += _relevance_blocks(note.get("relevance") or {}, s)
+    return blocks
 
 
-def _render_assessment(assessment: dict[str, Any], s: dict[str, str]) -> list[str]:
-    lines = [f"## {s['part2']}", "", f"### {s['claims']}", ""]
-    columns = (s["col_claim"], s["col_evidence"], s["col_confidence"], s["col_issue"])
-    lines.append("| " + " | ".join(columns) + " |")
-    lines.append("|---|---|---|---|")
+def _assessment_blocks(assessment: dict[str, Any], s: dict[str, str]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = [
+        {"type": "h1", "text": s["part2"]},
+        {"type": "h2", "text": s["claims"]},
+    ]
+
+    rows = []
     for claim in assessment.get("claims") or []:
         confidence = claim.get("confidence", "")
-        lines.append(
-            f"| {_cell(claim.get('claim'))} "
-            f"| {_cell(claim.get('evidence'), s['no_evidence'])} "
-            f"| {s.get(f'confidence_{confidence}', confidence)} "
-            f"| {_cell(claim.get('issue'))} |"
+        rows.append(
+            [
+                _text(claim.get("claim"), "—"),
+                _text(claim.get("evidence"), s["no_evidence"]),
+                s.get(f"confidence_{confidence}", confidence),
+                _text(claim.get("issue"), "—"),
+            ]
         )
-    lines.append("")
+    blocks.append(
+        {
+            "type": "table",
+            "header": [s["col_claim"], s["col_evidence"], s["col_confidence"], s["col_issue"]],
+            "rows": rows,
+        }
+    )
 
     limitations = assessment.get("limitations") or {}
-    lines += [f"### {s['limitations']}", ""]
+    blocks.append({"type": "h2", "text": s["limitations"]})
     for label, key in ((s["acknowledged"], "acknowledged"), (s["unstated"], "unstated")):
-        items = limitations.get(key) or []
-        lines.append(f"**{label}**")
-        lines.append("")
-        lines += [f"- {item}" for item in items] or ["- —"]
-        lines.append("")
+        blocks.append({"type": "label", "text": label})
+        blocks.append({"type": "bullets", "items": list(limitations.get(key) or []) or ["—"]})
 
     verdict = assessment.get("verdict") or {}
     decision = verdict.get("decision", "")
-    lines += [
-        f"### {s['verdict']}",
-        "",
-        f"**{s.get(f'decision_{decision}', decision)}** — {verdict.get('reasoning', '')}",
-        "",
-    ]
+    blocks.append({"type": "h2", "text": s["verdict"]})
+    blocks.append(
+        {
+            "type": "p",
+            "lead": s.get(f"decision_{decision}", decision),
+            "text": _text(verdict.get("reasoning")),
+        }
+    )
     if verdict.get("cost"):
-        lines += [f"**{s['cost']}**: {verdict['cost']}", ""]
+        # A labelled paragraph, not a one-item ``fields`` list — a lone bullet
+        # under the verdict reads as a list that lost its other entries.
+        blocks.append({"type": "p", "lead": s["cost"], "text": _text(verdict["cost"])})
     if verdict.get("next_steps"):
-        lines += [f"**{s['next_steps']}**", ""]
-        lines += [f"{i}. {step}" for i, step in enumerate(verdict["next_steps"], 1)]
-        lines.append("")
-    return lines
+        blocks.append({"type": "label", "text": s["next_steps"]})
+        blocks.append({"type": "numbered", "items": list(verdict["next_steps"])})
+    return blocks
 
 
-def _render_relevance(relevance: dict[str, Any], s: dict[str, str]) -> list[str]:
-    lines = [f"## {s['relevance']}", ""]
+def _relevance_blocks(relevance: dict[str, Any], s: dict[str, str]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = [{"type": "h1", "text": s["relevance"]}]
     if relevance.get("status") == "written":
-        lines += [str(relevance.get("text", "")).strip(), ""]
+        blocks.append({"type": "p", "text": _text(relevance.get("text"))})
     else:
-        lines += [s["no_background"], ""]
-    return lines
+        blocks.append({"type": "note", "text": s["no_background"]})
+    return blocks
+
+
+def _md_cell(value: str) -> str:
+    """Escape a value for a Markdown table cell.
+
+    Only Markdown needs this. A Word table cell holds the text verbatim, which
+    is why escaping happens here rather than in ``build_blocks``.
+    """
+    return value.replace("|", "\\|").replace("\n", " ")
+
+
+#: Markdown heading level per block type. ``title`` is ``#`` so the document
+#: has exactly one top-level heading.
+_MD_HEADINGS = {"title": "#", "h1": "##", "h2": "###"}
+
+
+def render_markdown(note: dict[str, Any]) -> str:
+    """The always-available rendering. Word and slides go through blocks."""
+    lines: list[str] = []
+    for block in build_blocks(note):
+        kind = block["type"]
+        if kind in _MD_HEADINGS:
+            lines += [f"{_MD_HEADINGS[kind]} {block['text']}", ""]
+        elif kind == "banner":
+            lines += [f"> **{block['lead']}** {block['text']}", ""]
+        elif kind == "note":
+            lines += [f"_{block['text']}_", ""]
+        elif kind == "label":
+            lines += [f"**{block['text']}**", ""]
+        elif kind == "p":
+            lead = block.get("lead")
+            lines += [f"**{lead}** — {block['text']}" if lead else block["text"], ""]
+        elif kind == "fields":
+            lines += [f"- **{f['label']}**: {f['value']}" for f in block["items"]]
+            lines.append("")
+        elif kind == "bullets":
+            lines += [f"- {item}" for item in block["items"]]
+            lines.append("")
+        elif kind == "numbered":
+            lines += [f"{i}. {item}" for i, item in enumerate(block["items"], 1)]
+            lines.append("")
+        elif kind == "table":
+            lines.append("| " + " | ".join(block["header"]) + " |")
+            lines.append("|" + "---|" * len(block["header"]))
+            for row in block["rows"]:
+                lines.append("| " + " | ".join(_md_cell(c) for c in row) + " |")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -387,9 +462,16 @@ def build_parser() -> argparse.ArgumentParser:
     validate_cmd = sub.add_parser("validate", help="check a note for gaps and ungrounded claims")
     validate_cmd.add_argument("note", type=Path)
 
-    render_cmd = sub.add_parser("render", help="render a note to Markdown")
+    render_cmd = sub.add_parser("render", help="render a note to Markdown or to blocks")
     render_cmd.add_argument("note", type=Path)
     render_cmd.add_argument("-o", "--output", type=Path, help="write here instead of stdout")
+    render_cmd.add_argument(
+        "--format",
+        choices=("md", "blocks"),
+        default="md",
+        help="md (default) or blocks — typed JSON for a non-Python renderer such "
+        "as the docx skill, with headings already in the note's language",
+    )
     render_cmd.add_argument(
         "--force",
         action="store_true",
@@ -425,13 +507,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     _report([], warnings)
-    markdown = render_markdown(note)
+    if args.format == "blocks":
+        rendered = json.dumps(build_blocks(note), ensure_ascii=False, indent=2) + "\n"
+    else:
+        rendered = render_markdown(note)
+
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(markdown, encoding="utf-8")
+        args.output.write_text(rendered, encoding="utf-8")
         print(f"wrote {args.output}", file=sys.stderr)
     else:
-        print(markdown, end="")
+        print(rendered, end="")
     return 0
 
 

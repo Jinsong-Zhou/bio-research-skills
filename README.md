@@ -115,12 +115,17 @@ Anthropic's collection:
 ```
 
 That skill is **licensed separately** — © Anthropic, with terms running through
-your agreement with Anthropic — and needs Node.js plus the `docx` npm package.
-It is not vendored here and cannot be. Outside a Claude environment, check
+your agreement with Anthropic — and needs Node.js plus the
+[`docx`](https://www.npmjs.com/package/docx) npm package, which is MIT and a
+separate thing. Neither is vendored here. Outside a Claude environment, check
 those terms before relying on it.
 
-Without it, `paper-deep-reading` renders the same note to Markdown and says why.
-Slides work the same way, via the `pptx` skill from the same plugin.
+What gets handed over is `note.py render --format blocks` — a typed document
+tree with the headings already in the note's language — not the Markdown. A
+renderer should not have to parse a table back out of pipe characters.
+
+Without the skill, `paper-deep-reading` renders the same note to Markdown and
+says why. Slides work the same way, from the same blocks, via `pptx`.
 
 ---
 
