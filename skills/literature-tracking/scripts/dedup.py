@@ -124,7 +124,12 @@ class MergeStats:
 
     papers_in: int = 0
     papers_out: int = 0
+    #: New unions created, by rule. Sums to ``duplicates_removed``.
     merges_by_tier: dict[str, int] = field(default_factory=dict)
+    #: Every time a rule matched a pair, whether or not it created a new union.
+    #: A pair already merged by an earlier rule still counts here — without
+    #: this, a rule that agrees with a cheaper one looks like it never fired.
+    rule_matches: dict[str, int] = field(default_factory=dict)
     crossref_lookups: int = 0
     crossref_failures: int = 0
     crossref_skipped: int = 0
@@ -277,6 +282,7 @@ def deduplicate(
         """Union two records and remember why, keeping reasons with the root."""
         root_a, root_b = union.find(a), union.find(b)
         carried = group_reasons.pop(root_a, set()) | group_reasons.pop(root_b, set())
+        stats.rule_matches[reason] = stats.rule_matches.get(reason, 0) + 1
         if union.union(a, b):
             stats.merges_by_tier[reason] = stats.merges_by_tier.get(reason, 0) + 1
         group_reasons[union.find(a)] = carried | {reason}

@@ -77,17 +77,17 @@ and will suggest the closest real subject area. Read
 
 ### 4. Run the fetch
 
-**Run from the skill's own directory** — the scripts import each other by bare
-name, so `scripts/` has to be the working root:
+**Run from the directory holding this `SKILL.md`** — the scripts import each
+other by bare name, so `scripts/` has to be the working root. Substitute the
+real path; there is no `$0` here, this file is not a script.
 
 ```bash
-cd "$(dirname "$0")"   # i.e. the directory holding this SKILL.md
+cd /path/to/skills/literature-tracking
 python3 scripts/track.py \
   --since 7d \
   --keywords "cryo-EM" "membrane transporter" "structure prediction" \
-  --biorxiv-categories biochemistry biophysics "molecular biology" \
-  --sources arxiv biorxiv pubmed \
-  --max-per-source 200 \
+  --biorxiv-categories biochemistry biophysics "molecular biology" "synthetic biology" \
+  --max-per-source 500 \
   > /tmp/papers.json
 ```
 
@@ -103,11 +103,24 @@ inside the same query, and they are usually months apart. Over a measured
 7-day window it cost 60 lookups and merged nothing. Turn it on for retrospective
 sweeps of 60+ days, where both versions can genuinely co-occur.
 
-Sizing: `--max-per-source 200` over 7 days is a good starting point. It is
-**split evenly across bioRxiv subject areas**, so four areas get 50 each — if
-you want depth in one area, ask for fewer areas rather than a bigger number.
-Expect a few minutes: arXiv permits one request per 3 seconds and the script
-honours it.
+Sizing: `--max-per-source 500` over 7 days. It is **split evenly across bioRxiv
+subject areas**, so four areas get 125 each — for depth in one area, ask for
+fewer areas rather than a bigger number. PubMed needs the headroom most: a
+broad keyword set easily matches 400+ records a week, and a cap below that does
+not sample the window (see step 5). Expect a few minutes; arXiv permits one
+request per 3 seconds and the script honours it.
+
+Keywords reach PubMed and Europe PMC, **not arXiv**. All of q-bio runs under a
+hundred submissions a week — small enough to rank by hand — and ANDing keywords
+onto it cut a measured window from 79 papers to 1, partly because arXiv splits
+hyphenated terms even inside quotes. `--arxiv-keywords` exists if the category
+filter really is too broad, but reach for `--arxiv-categories` first.
+
+Choose PubMed keywords with care too. Generic method words match far beyond
+biology: `"molecular dynamics"` and `"binding affinity"` pull in materials
+science, cement chemistry and battery papers, which can be most of what comes
+back. Pair them with a subject term through `--pubmed-term`, e.g.
+`'("molecular dynamics"[TIAB] AND (protein[TIAB] OR membrane[TIAB]))'`.
 
 A whole run takes minutes, not seconds, and prints progress to stderr. Let it
 finish; a killed run leaves you with a truncated JSON file that still parses.
@@ -116,21 +129,34 @@ finish; a killed run leaves you with a truncated JSON file that still parses.
 
 ```jsonc
 "stats": {
-  "fetched_by_source": {"arxiv": 43, "biorxiv": 118, "pubmed": 200},
-  "duplicates_merged": 12,
-  "merges_by_tier": {"biorxiv-published": 9, "crossref-relation": 3},
-  "crossref_skipped": 0
+  "coverage_by_source": {
+    "pubmed": {"fetched": 200, "available": 556, "truncated": true,
+               "covers": ["2026-07-28", "2026-07-29"]}
+  },
+  "truncated_sources": ["pubmed"],
+  "duplicates_merged": 20,
+  "merges_by_tier": {"exact-doi": 19, "title-fingerprint": 1},
+  "rule_matches": {"exact-doi": 19, "title-fingerprint": 18}
 }
 ```
 
 - **`errors` non-empty** — say which source failed and that the digest is
   partial. Never present an incomplete sweep as a complete one.
-- **`fetched_by_source` at exactly `max_per_source`** — that source was
-  truncated. Narrow the query or raise the cap; do not silently report the
-  first 200.
-- **`crossref_skipped` above zero** — the tier-2 budget ran out, so some
-  preprint/journal pairs may still be listed twice. Re-run with a higher
-  `--max-crossref-lookups`, or say so in the digest.
+- **`truncated_sources` non-empty** — ⚠️ **this is not a random sample.** Every
+  one of these APIs returns its newest records first, so a truncated fetch
+  drops the *early days of the window entirely*. Check `covers`: in the example
+  above a nominal 7-day PubMed sweep actually reached two days. Re-run with a
+  higher `--max-per-source` before writing anything, or the digest silently
+  describes the wrong week — and cross-source dedup misses pairs whose other
+  half fell in the discarded days.
+- **`crossref_skipped` above zero on a short window** — expected, and not worth
+  fixing. The rule is off under 60 days precisely because it cannot pay off
+  there; raising `--max-crossref-lookups` buys minutes of requests for nothing.
+  Only raise it on a 60+ day sweep.
+- **`merges_by_tier` vs `rule_matches`** — the first counts new merges, the
+  second counts every rule agreement. A rule showing 0 merges but many matches
+  is working; it just agreed with a cheaper rule that got there first. Judge a
+  rule by `rule_matches`, and individual papers by their `merge_reason`.
 
 PubMed needs one more caution. Its window is bounded on the **Entrez date**
 (when PubMed indexed the record), not the publication date, so a 7-day sweep
@@ -193,9 +219,19 @@ Group by theme, not by source — the user does not care which pipe it came out
 of. Per paper: title, authors (first + et al.), date, source, one-line reason,
 link. Lead with the two or three that genuinely matter.
 
-When a paper carries `also_in`, it was published *and* preprinted. Cite the
-version of record and mention the preprint is available — that is often the
-one they can actually read.
+`also_in` means the record was seen more than once — **check what kind of
+duplicate before describing it**, because most are not what they look like:
+
+- **`merge_reason: exact-doi` between two preprint sources** (typically
+  `biorxiv` + `europepmc`) is the *same preprint* arriving through two
+  channels. There is no journal version. Saying there is invents one — this is
+  the common case, usually the large majority of merges.
+- **A merge involving `pubmed`** is a genuine preprint-and-journal pair. Cite
+  the journal version and mention the preprint, which is often the one they can
+  actually read without a subscription.
+
+When in doubt, look at `also_in[].source`: if no member is `pubmed`, do not
+claim the paper has been published.
 
 Close with what was searched: window, sources, how many were scanned, how many
 made the cut. Trust comes from showing the funnel.

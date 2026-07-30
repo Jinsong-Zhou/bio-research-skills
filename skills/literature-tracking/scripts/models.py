@@ -53,6 +53,36 @@ class Paper:
         return out
 
 
+@dataclass
+class SearchResult:
+    """What one source returned, and what it *could* have returned.
+
+    ``available`` is the whole point. Every one of these APIs answers a
+    too-large query by silently returning its newest slice, so a caller that
+    only sees ``len(papers)`` cannot tell a complete sweep from one covering
+    the last day of an eight-day window. Reporting the true count turns that
+    into a number someone can act on.
+    """
+
+    papers: list[Paper]
+    #: Records matching the query in the window, per the API's own count.
+    #: ``None`` when the API does not report one.
+    available: int | None = None
+
+    def __len__(self) -> int:
+        return len(self.papers)
+
+    @property
+    def truncated(self) -> bool:
+        return self.available is not None and self.available > len(self.papers)
+
+    @property
+    def covered_range(self) -> tuple[date, date] | None:
+        """Earliest and latest date actually returned, for spotting skew."""
+        dates = [p.published_date for p in self.papers if p.published_date]
+        return (min(dates), max(dates)) if dates else None
+
+
 def dumps(papers: list[Paper], *, indent: int | None = 2) -> str:
     """Serialise papers to JSON."""
     return json.dumps([p.to_dict() for p in papers], indent=indent, ensure_ascii=False)

@@ -40,11 +40,15 @@ _UNIT_DAYS = {"d": 1, "w": 7, "m": 30, "y": 365}
 
 
 def parse_since(value: str, *, today: date | None = None) -> date:
-    """Accept ``7d`` / ``2w`` / ``3m`` / ``1y`` or an ISO date."""
+    """Accept ``7d`` / ``2w`` / ``3m`` / ``1y`` or an ISO date.
+
+    The window is inclusive at both ends, so ``7d`` spans exactly seven days
+    ending today — ``today - 6``, not ``today - 7``.
+    """
     today = today or date.today()
     if match := _RELATIVE.match(value.strip()):
         count, unit = int(match.group(1)), match.group(2).lower()
-        return today - timedelta(days=count * _UNIT_DAYS[unit])
+        return today - timedelta(days=count * _UNIT_DAYS[unit] - 1)
     try:
         return date.fromisoformat(value.strip())
     except ValueError as exc:
@@ -55,7 +59,7 @@ def parse_since(value: str, *, today: date | None = None) -> date:
 
 def _collect(
     args: argparse.Namespace,
-) -> tuple[list[Paper], list[dict[str, str]], dict[str, int]]:
+) -> tuple[list[Paper], list[dict[str, str]], dict[str, dict[str, Any]]]:
     """Query every requested source, tolerating individual failures.
 
     A source that fails is recorded and skipped — a broken PubMed key should
@@ -64,11 +68,11 @@ def _collect(
     """
     papers: list[Paper] = []
     errors: list[dict[str, str]] = []
-    counts: dict[str, int] = {}
+    coverage: dict[str, dict[str, Any]] = {}
 
     def run(name: str, fetch) -> None:
         try:
-            found = fetch()
+            result = fetch()
         except (
             FetchError,
             ValueError,
@@ -78,9 +82,31 @@ def _collect(
             errors.append({"source": name, "error": f"{type(exc).__name__}: {exc}"})
             print(f"  {name}: FAILED — {exc}", file=sys.stderr)
             return
-        counts[name] = len(found)
-        papers.extend(found)
-        print(f"  {name}: {len(found)} papers", file=sys.stderr)
+
+        window = result.covered_range
+        coverage[name] = {
+            "fetched": len(result),
+            "available": result.available,
+            "truncated": result.truncated,
+            "covers": [d.isoformat() for d in window] if window else None,
+        }
+        papers.extend(result.papers)
+
+        line = f"  {name}: {len(result)} papers"
+        if result.available is not None:
+            line += f" of {result.available}"
+        print(line, file=sys.stderr)
+
+        if result.truncated and result.available is not None:
+            # Every one of these APIs returns its newest slice first, so a
+            # truncated fetch does not sample the window — it drops the early
+            # days wholesale. Say which days actually survived.
+            span = f" — only covers {window[0]} .. {window[1]}" if window else ""
+            print(
+                f"    TRUNCATED: {result.available - len(result)} more exist{span}. "
+                f"Raise --max-per-source or narrow the query",
+                file=sys.stderr,
+            )
 
     print(f"Window {args.since} .. {args.until}", file=sys.stderr)
 
@@ -88,7 +114,11 @@ def _collect(
         run(
             "arxiv",
             lambda: arxiv.search(
-                keywords=args.keywords,
+                # Deliberately NOT args.keywords: all of q-bio runs under a
+                # hundred submissions a week, and ANDing keywords onto that cut
+                # a measured window from 79 papers to 1. Opt in with
+                # --arxiv-keywords when the category filter is too broad.
+                keywords=args.arxiv_keywords,
                 categories=args.arxiv_categories or list(arxiv.QBIO_CATEGORIES),
                 since=args.since,
                 until=args.until,
@@ -138,7 +168,7 @@ def _collect(
             ),
         )
 
-    return papers, errors, counts
+    return papers, errors, coverage
 
 
 def resolve_crossref(args: argparse.Namespace) -> tuple[bool, str]:
@@ -152,7 +182,7 @@ def resolve_crossref(args: argparse.Namespace) -> tuple[bool, str]:
         return True, ""
     if args.crossref == "off":
         return False, "disabled with --crossref off"
-    span = (args.until - args.since).days
+    span = (args.until - args.since).days + 1  # the window includes both ends
     if span < CROSSREF_MIN_WINDOW_DAYS:
         return False, (
             f"{span}-day window is under {CROSSREF_MIN_WINDOW_DAYS} days, so a preprint "
@@ -162,7 +192,7 @@ def resolve_crossref(args: argparse.Namespace) -> tuple[bool, str]:
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
-    papers, errors, counts = _collect(args)
+    papers, errors, coverage = _collect(args)
 
     use_crossref, reason = resolve_crossref(args)
     if reason:
@@ -210,17 +240,25 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "sources": list(args.sources),
             "keywords": args.keywords or [],
             "arxiv_categories": args.arxiv_categories or list(arxiv.QBIO_CATEGORIES),
+            "arxiv_keywords": args.arxiv_keywords or [],
             "biorxiv_categories": args.biorxiv_categories or [],
             "medrxiv_categories": args.medrxiv_categories or [],
             "pubmed_term": args.pubmed_term or "",
         },
         "stats": {
-            "fetched_by_source": counts,
+            # Per source: how many came back, how many existed, whether the
+            # fetch was cut short and which dates survived if so.
+            "coverage_by_source": coverage,
+            "fetched_by_source": {k: v["fetched"] for k, v in coverage.items()},
+            "truncated_sources": [k for k, v in coverage.items() if v["truncated"]],
             "fetched_total": stats.papers_in,
             "unique_total": stats.papers_out,
             "keyword_matched": flagged,
             "duplicates_merged": stats.duplicates_removed,
             "merges_by_tier": stats.merges_by_tier,
+            # Rules that agreed with a cheaper one still count here, so a rule
+            # can be seen working even when it created no new merge.
+            "rule_matches": stats.rule_matches,
             "crossref_lookups": stats.crossref_lookups,
             "crossref_failures": stats.crossref_failures,
             "crossref_skipped": stats.crossref_skipped,
@@ -261,6 +299,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--arxiv-categories", nargs="+", default=None,
         help=f"arXiv categories (default: all of q-bio, {len(arxiv.QBIO_CATEGORIES)} of them)",
+    )
+    parser.add_argument(
+        "--arxiv-keywords", nargs="+", default=None,
+        help="narrow arXiv with keywords too. Off by default and rarely worth "
+             "it: q-bio runs under 100 submissions a week, and a measured "
+             "window went from 79 papers to 1 once keywords were ANDed on",
     )
     parser.add_argument(
         "--biorxiv-categories", nargs="+", default=None,

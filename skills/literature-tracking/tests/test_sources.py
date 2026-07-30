@@ -192,9 +192,15 @@ class TestBiorxivPagination:
 
     def test_the_newest_records_are_returned_not_the_oldest(self, monkeypatch):
         self._fake_api(300, page=30, monkeypatch=monkeypatch)
-        papers = biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8), max_results=30)
-        returned = {int(p.doi.split("/")[-1]) for p in papers}
+        result = biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8), max_results=30)
+        returned = {int(p.doi.split("/")[-1]) for p in result.papers}
         assert min(returned) >= 270, f"got the oldest slice: {sorted(returned)[:3]}"
+
+    def test_the_windows_true_size_is_reported_so_truncation_is_visible(self, monkeypatch):
+        self._fake_api(300, page=30, monkeypatch=monkeypatch)
+        result = biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8), max_results=30)
+        assert result.available == 300
+        assert result.truncated is True, "30 of 300 must not look like a complete sweep"
 
     def test_the_cursor_advances_by_the_real_batch_length(self, monkeypatch):
         """Advancing by an assumed page size skips records between pages."""
@@ -224,7 +230,9 @@ class TestBiorxivPagination:
 
     def test_an_empty_window_is_not_an_error(self, monkeypatch):
         self._fake_api(0, monkeypatch=monkeypatch)
-        assert biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8)) == []
+        result = biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8))
+        assert result.papers == []
+        assert result.truncated is False
 
 
 class TestPubmedDates:
@@ -469,25 +477,29 @@ class TestLiveBehaviour:
         )
 
     def test_biorxiv_search_returns_the_newest_records(self):
-        found = biorxiv.search(
+        result = biorxiv.search(
             since=date.today() - timedelta(days=7),
             categories=["neuroscience"],  # busy enough to exceed one page
             max_results=40,
         )
-        assert found, "neuroscience should have preprints in any given week"
-        newest = max(p.published_date for p in found if p.published_date)
+        assert result.papers, "neuroscience should have preprints in any given week"
+        assert result.available, "the window's true size should be reported"
+        newest = max(p.published_date for p in result.papers if p.published_date)
         assert (date.today() - newest).days <= 3, (
             f"newest record is {newest}; the fetch is returning stale pages"
         )
 
     def test_arxiv_structured_queries_still_work(self):
-        found = arxiv.search(
+        result = arxiv.search(
             categories=["q-bio.BM", "q-bio.QM"],
             since=date.today().replace(day=1),
             max_results=3,
         )
-        assert found, "q-bio should have submissions this month"
-        assert all(any(c.startswith("q-bio") for c in p.categories) for p in found)
+        assert result.papers, "q-bio should have submissions this month"
+        assert all(
+            any(c.startswith("q-bio") for c in p.categories) for p in result.papers
+        )
+        assert result.available and result.available >= len(result.papers)
 
     def test_sampled_categories_stay_within_the_whitelist(self):
         from sources._http import fetch_json

@@ -26,7 +26,7 @@ from __future__ import annotations
 import difflib
 from datetime import date, datetime
 
-from models import Paper
+from models import Paper, SearchResult
 
 from ._http import fetch_json
 
@@ -216,8 +216,8 @@ def _reported_total(payload: dict) -> int | None:
 
 def _fetch_category(
     server: str, since: date, until: date, category: str | None, limit: int
-) -> list[Paper]:
-    """Fetch up to ``limit`` of the *newest* records in the window.
+) -> tuple[list[Paper], int | None]:
+    """Fetch up to ``limit`` of the *newest* records, plus the window's true size.
 
     The API paginates oldest-first, so once the window holds more than we want
     we seek to ``total - limit`` and read to the end rather than taking page 1.
@@ -228,11 +228,11 @@ def _fetch_category(
     probe = fetch_json(f"{window}/0", params)
     first_batch = probe.get("collection", [])
     if not first_batch:
-        return []
+        return [], _reported_total(probe) or 0
 
     total = _reported_total(probe)
     if total is None or total <= len(first_batch):
-        return [_to_paper(item, server) for item in first_batch[:limit]]
+        return [_to_paper(item, server) for item in first_batch[:limit]], total
 
     # Seek to the tail. Re-reading page 0 is only wasteful when the window is
     # small, and correctness beats saving one request.
@@ -248,7 +248,7 @@ def _fetch_category(
         papers.extend(_to_paper(item, server) for item in batch)
         cursor += len(batch)  # never a hardcoded page size
 
-    return papers[-limit:] if len(papers) > limit else papers
+    return (papers[-limit:] if len(papers) > limit else papers), total
 
 
 def search(
@@ -258,7 +258,7 @@ def search(
     categories: list[str] | None = None,
     server: str = "biorxiv",
     max_results: int = 500,
-) -> list[Paper]:
+) -> SearchResult:
     """Fetch preprints posted in ``[since, until]``, newest first.
 
     ``categories`` of ``None`` means every subject area. Each category costs a
@@ -280,9 +280,12 @@ def search(
     per_category = max(1, max_results // len(resolved))
 
     collected: list[Paper] = []
+    available = 0
     for category in resolved:
-        collected.extend(_fetch_category(server, since, until, category, per_category))
+        found, total = _fetch_category(server, since, until, category, per_category)
+        collected.extend(found)
+        available += total or 0
 
     papers = _collapse_versions(collected)
     papers.sort(key=lambda p: (p.published_date or date.min), reverse=True)
-    return papers[:max_results]
+    return SearchResult(papers[:max_results], available)

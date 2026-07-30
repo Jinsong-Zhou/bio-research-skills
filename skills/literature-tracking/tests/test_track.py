@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import pytest
 import track
-from models import Paper
+from models import Paper, SearchResult
 
 TODAY = date(2026, 7, 30)
 
@@ -13,13 +13,13 @@ class TestParseSince:
     @pytest.mark.parametrize(
         ("given", "expected"),
         [
-            ("7d", date(2026, 7, 23)),
-            ("2w", date(2026, 7, 16)),
-            ("1m", date(2026, 6, 30)),
-            ("1y", date(2025, 7, 30)),
+            ("7d", date(2026, 7, 24)),
+            ("2w", date(2026, 7, 17)),
+            ("1m", date(2026, 7, 1)),
+            ("1y", date(2025, 7, 31)),
             ("2026-07-01", date(2026, 7, 1)),
-            ("  7d  ", date(2026, 7, 23)),
-            ("7D", date(2026, 7, 23)),
+            ("  7d  ", date(2026, 7, 24)),
+            ("7D", date(2026, 7, 24)),
         ],
     )
     def test_relative_and_absolute_forms(self, given, expected):
@@ -59,9 +59,10 @@ class TestCrossrefAuto:
     """The rule merges preprint with journal version — both must be in range."""
 
     def _args(self, crossref, span_days):
+        """``span_days`` counts both ends, matching how the CLI reports it."""
         args = track.build_parser().parse_args(["--crossref", crossref])
         args.until = TODAY
-        args.since = TODAY - timedelta(days=span_days)
+        args.since = TODAY - timedelta(days=span_days - 1)
         return args
 
     def test_a_weekly_window_turns_it_off_with_a_reason(self):
@@ -104,14 +105,16 @@ class TestReport:
 
     def test_a_failing_source_does_not_take_the_others_down(self, monkeypatch):
         monkeypatch.setattr(
-            track.arxiv, "search", lambda **kw: [self._paper("arxiv", "10.1/a", "A study of X")]
+            track.arxiv,
+            "search",
+            lambda **kw: SearchResult([self._paper("arxiv", "10.1/a", "A study of X")]),
         )
         monkeypatch.setattr(
             track.biorxiv,
             "search",
             lambda **kw: (_ for _ in ()).throw(track.FetchError("bioRxiv is down")),
         )
-        monkeypatch.setattr(track.pubmed, "search", lambda **kw: [])
+        monkeypatch.setattr(track.pubmed, "search", lambda **kw: SearchResult([]))
 
         report = track.build_report(self._args(crossref="off"))
 
@@ -122,7 +125,7 @@ class TestReport:
     def test_errors_key_is_present_even_on_a_clean_run(self, monkeypatch):
         """Callers need to tell 'nothing new' from 'three sources fell over'."""
         for module in (track.arxiv, track.biorxiv, track.pubmed):
-            monkeypatch.setattr(module, "search", lambda **kw: [])
+            monkeypatch.setattr(module, "search", lambda **kw: SearchResult([]))
         report = track.build_report(self._args(crossref="off"))
         assert report["errors"] == []
         assert report["papers"] == []
@@ -130,7 +133,7 @@ class TestReport:
 
     def test_the_query_is_echoed_back_for_reproducibility(self, monkeypatch):
         for module in (track.arxiv, track.biorxiv, track.pubmed):
-            monkeypatch.setattr(module, "search", lambda **kw: [])
+            monkeypatch.setattr(module, "search", lambda **kw: SearchResult([]))
         report = track.build_report(self._args(crossref="off", keywords=["cryo-EM"]))
         assert report["query"]["since"] == "2026-07-23"
         assert report["query"]["keywords"] == ["cryo-EM"]
@@ -139,18 +142,70 @@ class TestReport:
     def test_duplicates_across_sources_are_merged_in_the_report(self, monkeypatch):
         title = "Cryo-EM structure of a bacterial multidrug efflux transporter"
         monkeypatch.setattr(
-            track.arxiv, "search", lambda **kw: [self._paper("arxiv", "10.1/a", title)]
+            track.arxiv,
+            "search",
+            lambda **kw: SearchResult([self._paper("arxiv", "10.1/a", title)]),
         )
         monkeypatch.setattr(
-            track.biorxiv, "search", lambda **kw: [self._paper("biorxiv", "10.2/b", title)]
+            track.biorxiv,
+            "search",
+            lambda **kw: SearchResult([self._paper("biorxiv", "10.2/b", title)]),
         )
-        monkeypatch.setattr(track.pubmed, "search", lambda **kw: [])
+        monkeypatch.setattr(track.pubmed, "search", lambda **kw: SearchResult([]))
 
         report = track.build_report(self._args(crossref="off"))
 
         assert report["stats"]["fetched_total"] == 2
         assert report["stats"]["unique_total"] == 1
         assert report["stats"]["merges_by_tier"] == {"title-fingerprint": 1}
+
+
+    def test_truncation_is_reported_with_the_days_actually_covered(self, monkeypatch):
+        """A truncated fetch drops the window's early days, not a random slice."""
+        recent = [
+            self._paper("pubmed", f"10.1/{i}", f"Paper number {i}") for i in range(3)
+        ]
+        monkeypatch.setattr(
+            track.pubmed, "search", lambda **kw: SearchResult(recent, available=556)
+        )
+        for module in (track.arxiv, track.biorxiv):
+            monkeypatch.setattr(module, "search", lambda **kw: SearchResult([], available=0))
+
+        report = track.build_report(self._args(crossref="off"))
+
+        assert report["stats"]["truncated_sources"] == ["pubmed"]
+        pubmed_coverage = report["stats"]["coverage_by_source"]["pubmed"]
+        assert pubmed_coverage == {
+            "fetched": 3,
+            "available": 556,
+            "truncated": True,
+            "covers": [TODAY.isoformat(), TODAY.isoformat()],
+        }
+
+    def test_a_complete_sweep_is_not_flagged(self, monkeypatch):
+        for module in (track.arxiv, track.biorxiv, track.pubmed):
+            monkeypatch.setattr(module, "search", lambda **kw: SearchResult([], available=0))
+        report = track.build_report(self._args(crossref="off"))
+        assert report["stats"]["truncated_sources"] == []
+
+    def test_keywords_do_not_reach_arxiv_unless_asked_for(self, monkeypatch):
+        """q-bio is small; ANDing keywords onto it cut 79 papers to 1."""
+        seen = {}
+        monkeypatch.setattr(
+            track.arxiv,
+            "search",
+            lambda **kw: seen.update(kw) or SearchResult([]),
+        )
+        for module in (track.biorxiv, track.pubmed):
+            monkeypatch.setattr(module, "search", lambda **kw: SearchResult([]))
+
+        track.build_report(self._args(crossref="off", keywords=["cryo-EM"]))
+        assert seen["keywords"] is None, "--keywords must not narrow arXiv"
+
+        track.build_report(
+            self._args(crossref="off", keywords=["cryo-EM"], arxiv_keywords=["folding"])
+        )
+        assert seen["keywords"] == ["folding"], "--arxiv-keywords is the opt-in"
 
 
 class TestMain:

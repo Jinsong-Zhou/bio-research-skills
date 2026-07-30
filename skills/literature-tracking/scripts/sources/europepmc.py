@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime
 
-from models import Paper
+from models import Paper, SearchResult
 
 from ._http import FetchError, fetch_json
 
@@ -140,7 +140,7 @@ def search(
     until: date | None = None,
     publishers: list[str] | None = None,
     max_results: int = 200,
-) -> list[Paper]:
+) -> SearchResult:
     """Fetch preprints matching ``keywords`` in ``[since, until]``.
 
     Raises:
@@ -154,6 +154,7 @@ def search(
 
     query = build_query(keywords, since, until, publishers)
     papers: list[Paper] = []
+    available: int | None = None
     cursor = "*"
     for _ in range(MAX_PAGES):
         if len(papers) >= max_results:
@@ -170,6 +171,8 @@ def search(
             },
         )
         _check_query_echo(payload, query)
+        if available is None and str(payload.get("hitCount")).isdigit():
+            available = int(payload["hitCount"])
 
         batch = (payload.get("resultList") or {}).get("result") or []
         if not batch:
@@ -182,7 +185,7 @@ def search(
             break
         cursor = following
 
-    return papers[:max_results]
+    return SearchResult(papers[:max_results], available)
 
 
 __all__ = ["EuropePmcQueryError", "FetchError", "build_query", "search"]

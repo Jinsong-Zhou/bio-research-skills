@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from xml.etree import ElementTree as ET
 
-from models import Paper
+from models import Paper, SearchResult
 
 from ._http import fetch_xml
 
@@ -138,6 +138,11 @@ def _parse_entry(entry: ET.Element) -> Paper:
     )
 
 
+def _total_results(root: ET.Element) -> int | None:
+    raw = root.findtext("opensearch:totalResults", namespaces=NS)
+    return int(raw) if raw and raw.strip().isdigit() else None
+
+
 def search(
     *,
     keywords: list[str] | None = None,
@@ -145,8 +150,13 @@ def search(
     since: date | None = None,
     until: date | None = None,
     max_results: int = 200,
-) -> list[Paper]:
+) -> SearchResult:
     """Fetch arXiv papers matching the filters, newest submission first.
+
+    Note that ANDing keywords onto a category filter is usually a mistake here:
+    all of q-bio runs under a hundred submissions a week, small enough to rank
+    by hand, and arXiv splits hyphenated terms even inside quotes. See
+    ``references/source-quirks.md``.
 
     Raises:
         ArxivQueryError: the query was malformed (arXiv's 200-with-Error case).
@@ -157,6 +167,7 @@ def search(
 
     papers: list[Paper] = []
     seen_ids: set[str] = set()
+    available: int | None = None
     start = 0
     while len(papers) < wanted:
         root = fetch_xml(
@@ -170,6 +181,8 @@ def search(
             },
         )
         _check_for_error_entry(root)
+        if available is None:
+            available = _total_results(root)
 
         entries = root.findall("atom:entry", NS)
         if not entries:
@@ -186,4 +199,4 @@ def search(
             break
         start += len(entries)
 
-    return papers[:wanted]
+    return SearchResult(papers[:wanted], available)

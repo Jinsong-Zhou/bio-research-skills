@@ -24,7 +24,7 @@ import os
 from datetime import date
 from xml.etree import ElementTree as ET
 
-from models import Paper
+from models import Paper, SearchResult
 
 from ._http import fetch_json, fetch_xml
 
@@ -161,8 +161,15 @@ def _parse_article(article: ET.Element) -> Paper | None:
     )
 
 
-def _esearch(term: str, since: date, until: date, max_results: int) -> list[str]:
+def _esearch(term: str, since: date, until: date, max_results: int) -> tuple[list[str], int | None]:
+    """Return matching PMIDs and the window's true match count.
+
+    esearch orders newest-indexed first, so a ``max_results`` smaller than the
+    match count does not sample the window — it returns only its final day or
+    two. Reporting ``count`` is what makes that visible.
+    """
     ids: list[str] = []
+    available: int | None = None
     retstart = 0
     while len(ids) < max_results:
         payload = fetch_json(
@@ -179,14 +186,18 @@ def _esearch(term: str, since: date, until: date, max_results: int) -> list[str]
                 **_auth_params(),
             },
         )
-        batch = payload.get("esearchresult", {}).get("idlist", [])
+        result = payload.get("esearchresult", {})
+        if available is None:
+            raw = result.get("count")
+            available = int(raw) if str(raw).isdigit() else None
+        batch = result.get("idlist", [])
         if not batch:
             break
         ids.extend(batch)
         retstart += len(batch)
         if len(batch) < SEARCH_BATCH:
             break
-    return ids[:max_results]
+    return ids[:max_results], available
 
 
 def search(
@@ -196,11 +207,13 @@ def search(
     keywords: list[str] | None = None,
     term: str | None = None,
     max_results: int = 200,
-) -> list[Paper]:
+) -> SearchResult:
     """Fetch PubMed records whose Entrez date falls in ``[since, until]``.
 
     Pass either ``keywords`` (ORed together) or a raw PubMed ``term`` for full
-    control over field tags and boolean structure.
+    control over field tags and boolean structure. Generic method words are
+    worth avoiding — ``"molecular dynamics"[Title/Abstract]`` matches most of
+    physical chemistry, so pair them with a subject term via ``term``.
 
     Raises:
         ValueError: neither keywords nor term was supplied.
@@ -215,9 +228,9 @@ def search(
             raise ValueError("pass keywords or a raw PubMed term")
         term = " OR ".join(f'"{k}"[Title/Abstract]' for k in keywords)
 
-    ids = _esearch(term, since, until, max_results)
+    ids, available = _esearch(term, since, until, max_results)
     if not ids:
-        return []
+        return SearchResult([], available)
 
     papers: list[Paper] = []
     for start in range(0, len(ids), FETCH_BATCH):
@@ -235,4 +248,4 @@ def search(
                 papers.append(paper)
 
     papers.sort(key=lambda p: (p.published_date or date.min), reverse=True)
-    return papers
+    return SearchResult(papers, available)
