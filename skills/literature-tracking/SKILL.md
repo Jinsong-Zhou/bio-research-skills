@@ -51,7 +51,14 @@ models**, and a query that suits one silently misbehaves on another:
 | PubMed | yes, with field tags | yes | via MeSH in the term |
 
 So: send **keywords** to arXiv and PubMed, send **subject areas** to
-bioRxiv/medRxiv, and let the ranking in step 5 do the narrowing there.
+bioRxiv/medRxiv, and let the ranking in step 6 do the narrowing there.
+
+Pick bioRxiv areas from the profile, not from habit. `biochemistry`,
+`biophysics` and `molecular biology` suit structural work; add
+`synthetic biology` and `bioengineering` whenever protein *design* is in scope —
+leaving them out is how a design-focused digest ends up with no design papers.
+`bioinformatics` is high-volume and low-yield for a structural lab (tool and
+pipeline announcements); include it only if methods development is the point.
 
 Passing a keyword where bioRxiv expects a subject area is the single most
 dangerous mistake available here — the API drops the filter and returns
@@ -61,22 +68,35 @@ and will suggest the closest real subject area. Read
 
 ### 4. Run the fetch
 
+**Run from the skill's own directory** — the scripts import each other by bare
+name, so `scripts/` has to be the working root:
+
 ```bash
+cd "$(dirname "$0")"   # i.e. the directory holding this SKILL.md
 python3 scripts/track.py \
   --since 7d \
   --keywords "cryo-EM" "membrane transporter" "structure prediction" \
   --biorxiv-categories biochemistry biophysics "molecular biology" \
   --sources arxiv biorxiv pubmed \
   --max-per-source 200 \
-  > papers.json
+  > /tmp/papers.json
 ```
 
-Useful flags: `--until` for a closed window, `--pubmed-term` for a raw PubMed
-query with field tags, `--no-crossref` to skip the one network-bound dedup tier,
-`--medrxiv-categories` for clinical work. `--help` lists everything.
+Write the JSON outside the skill directory so runs never dirty the repo.
 
-JSON goes to stdout, progress to stderr. Read `papers.json` rather than piping
-it through your context.
+Useful flags: `--until` for a closed window, `--pubmed-term` for a raw PubMed
+query with field tags, `--medrxiv-categories` for clinical work,
+`--max-crossref-lookups` to raise the dedup tier-2 budget, `--no-crossref` to
+skip that tier entirely. `--help` lists everything.
+
+Sizing: `--max-per-source 200` over 7 days is a good starting point. It is
+**split evenly across bioRxiv subject areas**, so four areas get 50 each — if
+you want depth in one area, ask for fewer areas rather than a bigger number.
+Expect a few minutes: arXiv permits one request per 3 seconds and the script
+honours it.
+
+A whole run takes minutes, not seconds, and prints progress to stderr. Let it
+finish; a killed run leaves you with a truncated JSON file that still parses.
 
 ### 5. Check `stats` and `errors` before reading a single paper
 
@@ -95,19 +115,44 @@ it through your context.
   truncated. Narrow the query or raise the cap; do not silently report the
   first 200.
 - **`crossref_skipped` above zero** — the tier-2 budget ran out, so some
-  preprint/journal pairs may still be listed twice.
+  preprint/journal pairs may still be listed twice. Re-run with a higher
+  `--max-crossref-lookups`, or say so in the digest.
+
+PubMed needs one more caution. Its window is bounded on the **Entrez date**
+(when PubMed indexed the record), not the publication date, so a 7-day sweep
+legitimately surfaces papers published months earlier. `published_date` is when
+it was published; `extra.entrez_date` is what the search filtered on. Do not
+present an April paper under a "this week" heading without saying which is which.
 
 ### 6. Rank against the profile — this is your job
 
-Read `papers.json` and judge each paper on title and abstract. For each, decide:
+A 200-paper report is roughly 250 KB; do not read it whole. Extract titles
+first, shortlist on those, then pull abstracts only for the shortlist:
+
+```bash
+python3 -c "import json;[print(i,p['source'],p['title']) for i,p in enumerate(json.load(open('/tmp/papers.json'))['papers'])]"
+```
+
+Then judge each shortlisted paper on title and abstract:
 
 - **score 0–5** for relevance to the profile
 - **one sentence** on why it matters to *this* user — not a summary of the
   abstract, a reason to care
 
-Then keep what clears a threshold rather than a fixed top-N. A quiet week
-should produce a short digest; forcing ten items means padding with noise.
-That is the "alerts too broad or too narrow" problem, and a fixed N recreates it.
+Calibrate the scale so runs stay comparable:
+
+| Score | Meaning |
+|---|---|
+| **5** | Changes what they do next — their system, their method, a result that invalidates an assumption they hold |
+| **4** | Squarely on-topic; they would want to read it this week |
+| **3** | Adjacent and useful — a review, a tool, a neighbouring system |
+| **2** | Same field, no bearing on their work |
+| **0–1** | Matched a keyword by accident, or hits a stated exclusion |
+
+Keep what clears a threshold (3 is a reasonable default) rather than a fixed
+top-N. A quiet week should produce a short digest; forcing ten items means
+padding with noise. That is the "alerts too broad or too narrow" problem, and a
+fixed N recreates it.
 
 Weigh: overlap with stated topics; whether the method is one they use; whether
 it challenges or extends work they follow; whether an author is someone they

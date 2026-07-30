@@ -7,8 +7,13 @@ Two things worth knowing:
   Entrez/PubMed history dates and the electronic ``<ArticleDate>``, both of
   which carry a day, and fall back to ``<PubDate>`` only as a last resort.
 * ``esearch`` bounds the window server-side via ``mindate``/``maxdate`` plus
-  ``datetype=edat`` (Entrez date = when the record appeared), so we never pull
-  a year of results just to throw them away.
+  ``datetype=edat`` (Entrez date = when PubMed indexed the record), so we never
+  pull a year of results just to throw them away. **The Entrez date is not the
+  publication date**: a paper published in April can be indexed in July, so a
+  seven-day window legitimately returns records whose ``published_date`` is
+  months old. Both are kept — ``published_date`` is when it was published,
+  ``extra["entrez_date"]`` is the one that bounded the search — so a digest can
+  say which it means instead of quietly contradicting its own window.
 
 Set ``NCBI_API_KEY`` to raise the rate limit from 3 to 10 requests/second.
 """
@@ -69,6 +74,11 @@ def _date_from(node: ET.Element | None) -> date | None:
     except ValueError:
         # e.g. "31" in a 30-day month; clamp rather than drop the record.
         return date(year, month, 1)
+
+
+def _entrez_date(article: ET.Element) -> date | None:
+    """When PubMed indexed the record — the date ``esearch`` filters on."""
+    return _date_from(article.find('.//PubmedData/History/PubMedPubDate[@PubStatus="entrez"]'))
 
 
 def _best_date(article: ET.Element) -> date | None:
@@ -140,6 +150,9 @@ def _parse_article(article: ET.Element) -> Paper | None:
         extra={
             "pmid": pmid,
             "pmcid": pmcid,
+            # The date esearch actually filtered on. Differs from published_date
+            # whenever PubMed indexed the paper later than it appeared.
+            "entrez_date": (d.isoformat() if (d := _entrez_date(article)) else ""),
             "journal": _text(article.find(".//Journal/Title")),
             "publication_types": [
                 _text(t) for t in article.findall(".//Article/PublicationTypeList/PublicationType")

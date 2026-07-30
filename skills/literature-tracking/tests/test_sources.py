@@ -5,7 +5,7 @@ the API's real behaviour still matches what ``references/source-quirks.md``
 documents. Run those with ``uv run pytest -m live``.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -156,6 +156,77 @@ class TestBiorxivRecords:
             biorxiv.search(since=date(2026, 7, 1), server="arxiv")
 
 
+class TestBiorxivPagination:
+    """The API pages oldest-first at a page size it never promises.
+
+    Assuming a constant page size caps every query at one page; reading page 1
+    returns the oldest slice, which is backwards for a "what's new" query.
+    """
+
+    def _fake_api(self, total, page=30, monkeypatch=None):
+        """Serve `total` records, ascending by day, `page` at a time."""
+        calls = []
+
+        def fetch(url, params=None, **kwargs):
+            cursor = int(url.rstrip("/").rsplit("/", 1)[-1])
+            calls.append(cursor)
+            batch = [
+                biorxiv_item(
+                    doi=f"10.64898/{i:04d}",
+                    date=f"2026-07-{1 + i // 50:02d}",
+                    title=f"Paper number {i:04d}",
+                )
+                for i in range(cursor, min(cursor + page, total))
+            ]
+            return {"messages": [{"total": str(total), "count": len(batch)}], "collection": batch}
+
+        monkeypatch.setattr(biorxiv, "fetch_json", fetch)
+        return calls
+
+    def test_more_than_one_page_is_fetched(self, monkeypatch):
+        """30 < an assumed PAGE_SIZE of 100 would break after the first page."""
+        calls = self._fake_api(300, page=30, monkeypatch=monkeypatch)
+        papers = biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8), max_results=90)
+        assert len(papers) == 90
+        assert len(calls) > 2, "a single page means the loop exited early"
+
+    def test_the_newest_records_are_returned_not_the_oldest(self, monkeypatch):
+        self._fake_api(300, page=30, monkeypatch=monkeypatch)
+        papers = biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8), max_results=30)
+        returned = {int(p.doi.split("/")[-1]) for p in papers}
+        assert min(returned) >= 270, f"got the oldest slice: {sorted(returned)[:3]}"
+
+    def test_the_cursor_advances_by_the_real_batch_length(self, monkeypatch):
+        """Advancing by an assumed page size skips records between pages."""
+        calls = self._fake_api(200, page=30, monkeypatch=monkeypatch)
+        biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8), max_results=120)
+        steps = [b - a for a, b in zip(calls[1:], calls[2:])]
+        assert all(step == 30 for step in steps), f"cursor jumped: {calls}"
+
+    def test_a_window_smaller_than_one_page_needs_no_seeking(self, monkeypatch):
+        calls = self._fake_api(12, page=30, monkeypatch=monkeypatch)
+        papers = biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8), max_results=200)
+        assert len(papers) == 12
+        assert calls == [0], "one page held everything; no second request needed"
+
+    def test_categories_get_equal_budgets(self, monkeypatch):
+        """Otherwise the first, busiest category consumes the whole allowance."""
+        self._fake_api(300, page=30, monkeypatch=monkeypatch)
+        papers = biorxiv.search(
+            since=date(2026, 7, 1),
+            until=date(2026, 7, 8),
+            categories=["biochemistry", "biophysics"],
+            max_results=60,
+        )
+        # Both passes hit the same stub, so version collapsing folds them back
+        # into one set of 30 — the point is that neither asked for all 60.
+        assert len(papers) == 30
+
+    def test_an_empty_window_is_not_an_error(self, monkeypatch):
+        self._fake_api(0, monkeypatch=monkeypatch)
+        assert biorxiv.search(since=date(2026, 7, 1), until=date(2026, 7, 8)) == []
+
+
 class TestPubmedDates:
     """Year-only PubDate is the trap: it lands every record on 1 January."""
 
@@ -247,6 +318,25 @@ class TestPubmedArticles:
         with pytest.raises(ValueError, match="keywords or a raw PubMed term"):
             pubmed.search(since=date(2026, 7, 1))
 
+    def test_the_entrez_date_is_recorded_alongside_the_publication_date(self):
+        """esearch filters on the Entrez date; the digest shows the pub date.
+
+        Keeping only one makes a record indexed in July but published in April
+        look like it violates a seven-day window.
+        """
+        article = ET.fromstring(
+            "<PubmedArticle><MedlineCitation><PMID>1</PMID><Article>"
+            "<ArticleTitle>T</ArticleTitle>"
+            "<ArticleDate><Year>2026</Year><Month>4</Month><Day>13</Day></ArticleDate>"
+            "</Article></MedlineCitation>"
+            '<PubmedData><History><PubMedPubDate PubStatus="entrez">'
+            "<Year>2026</Year><Month>7</Month><Day>28</Day>"
+            "</PubMedPubDate></History></PubmedData></PubmedArticle>"
+        )
+        paper = pubmed._parse_article(article)
+        assert paper.published_date == date(2026, 4, 13)
+        assert paper.extra["entrez_date"] == "2026-07-28"
+
 
 @pytest.mark.live
 class TestLiveBehaviour:
@@ -267,6 +357,44 @@ class TestLiveBehaviour:
         assert len({i["category"] for i in bogus}) > 1, (
             "bioRxiv started honouring unknown categories — the whitelist guard "
             "may no longer be necessary"
+        )
+
+    def test_biorxiv_page_size_and_ordering_are_what_the_code_assumes(self):
+        """The regression that shipped in v0.1, caught only against the real API.
+
+        Constructed fixtures cannot catch this: the mock returns whatever page
+        size its author assumed, so the test agrees with the bug.
+        """
+        from sources._http import fetch_json
+
+        window = "https://api.biorxiv.org/details/biorxiv/2026-07-23/2026-07-30"
+        probe = fetch_json(f"{window}/0")
+        page_size = len(probe["collection"])
+        total = int(probe["messages"][0]["total"])
+
+        assert page_size < 100, (
+            f"page size is {page_size}; any code assuming 100 stops after page 1"
+        )
+        assert total > page_size, "window too small to exercise pagination"
+
+        first = sorted(i["date"] for i in probe["collection"])
+        last_page = fetch_json(f"{window}/{max(0, total - page_size)}")
+        last = sorted(i["date"] for i in last_page["collection"])
+        assert first[-1] <= last[0], (
+            "records are no longer oldest-first; the tail-seeking in "
+            "_fetch_category would now return the wrong end of the window"
+        )
+
+    def test_biorxiv_search_returns_the_newest_records(self):
+        found = biorxiv.search(
+            since=date.today() - timedelta(days=7),
+            categories=["neuroscience"],  # busy enough to exceed one page
+            max_results=40,
+        )
+        assert found, "neuroscience should have preprints in any given week"
+        newest = max(p.published_date for p in found if p.published_date)
+        assert (date.today() - newest).days <= 3, (
+            f"newest record is {newest}; the fetch is returning stale pages"
         )
 
     def test_arxiv_structured_queries_still_work(self):

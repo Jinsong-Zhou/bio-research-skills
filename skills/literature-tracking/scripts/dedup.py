@@ -10,20 +10,26 @@ No DOI prefix is hardcoded anywhere here, deliberately: bioRxiv has issued at
 least two (``10.1101/`` historically, ``10.64898/`` on records seen in 2026),
 so prefix sniffing would quietly stop working.
 
-Four tiers, cheapest first, each catching what the previous one missed:
+Four rules, applied cheapest first so the one that costs network requests only
+sees what the free ones could not match:
 
-====  ==========================================  ===============================
-Tier  Rule                                        Cost
-====  ==========================================  ===============================
-0     Identical normalised DOI                    free
-1     bioRxiv/medRxiv ``published`` field         free (already in the record)
-2     Crossref ``is-preprint-of``/``has-preprint``  one request per unresolved DOI
-3     Title fingerprint + first author + year     free
-====  ==========================================  ===============================
+=====  ==========================================  ==============================
+Order  Rule                                        Cost
+=====  ==========================================  ==============================
+1      Identical normalised DOI                    free
+2      bioRxiv/medRxiv ``published`` field         free (already in the record)
+3      Title fingerprint + first author + year     free
+4      Crossref ``is-preprint-of``/``has-preprint``  ~1.4s per unmatched DOI
+=====  ==========================================  ==============================
 
-Tier 3 is deliberately last and deliberately conservative: short titles are
-skipped entirely, because merging two distinct papers is worse than showing one
-twice.
+Crossref runs last on purpose. It is the only rule that catches a paper
+retitled between preprint and publication, but at roughly 1.4 seconds a lookup
+it dominates the runtime — so it should only ever see the residue. Running it
+before the free title match wastes requests on pairs already solved.
+
+The title rule is deliberately conservative: short titles are skipped
+entirely, and a first-author surname plus a year window must agree. Merging two
+distinct papers is worse than showing one twice.
 
 Acknowledgements
     Tier 0 mirrors ``_paper_unique_key`` from openags/paper-search-mcp (MIT).
@@ -70,13 +76,40 @@ def title_fingerprint(title: str) -> str:
     return _NON_ALNUM.sub("", (title or "").lower())
 
 
+def _looks_like_initials(token: str) -> bool:
+    """True for PubMed's trailing initials block: 'ME', 'JA', 'W'."""
+    letters = token.replace(".", "")
+    return 1 <= len(letters) <= 3 and letters.isalpha() and letters.isupper()
+
+
 def _surname(paper: Paper) -> str:
-    """First author's surname, normalised. Empty when unavailable."""
+    """First author's surname, normalised. Empty when unavailable.
+
+    The three sources disagree on name order, and getting this wrong quietly
+    disables tier 3: bucketing on the *initials* rather than the surname puts a
+    PubMed record and its preprint in different buckets, so they never merge.
+
+    ==============================  ==============  =========
+    Format                          Example         Surname
+    ==============================  ==============  =========
+    bioRxiv ``Surname, Given``      Falzone, M.     Falzone
+    PubMed ``Surname Initials``     Falzone ME      Falzone
+    arXiv ``Given Surname``         Wei Zhang       Zhang
+    ==============================  ==============  =========
+    """
     if not paper.authors:
         return ""
     first = paper.authors[0].strip()
-    # bioRxiv gives "Smith, John A."; PubMed gives "Smith JA"; arXiv "John A. Smith".
-    surname = first.split(",")[0] if "," in first else first.split()[-1] if first.split() else ""
+    if "," in first:
+        surname = first.split(",")[0]
+    else:
+        tokens = first.split()
+        if not tokens:
+            surname = ""
+        elif len(tokens) > 1 and _looks_like_initials(tokens[-1]):
+            surname = tokens[0]  # PubMed order
+        else:
+            surname = tokens[-1]  # given-name-first order
     return _NON_ALNUM.sub("", surname.lower())
 
 
@@ -178,16 +211,16 @@ def deduplicate(
 ) -> tuple[list[Paper], MergeStats]:
     """Merge records describing the same work across sources.
 
-    Tiers run in order and each union takes effect immediately, so tier 2 only
-    spends requests on records the cheap tiers left unmatched.
+    Rules run in order and each union takes effect immediately, so Crossref —
+    the only one that costs requests — sees only what the free rules missed.
 
     Args:
-        use_crossref: run tier 2. Costs one request per still-unmatched DOI;
-            disable for a fully offline pass.
-        max_crossref_lookups: hard ceiling on tier-2 requests. Any records
-            skipped because of it are reported in ``MergeStats.crossref_skipped``.
-        year_window: maximum year gap for a tier-3 fingerprint match.
-        min_title_chars: titles shorter than this skip tier 3 entirely.
+        use_crossref: run the Crossref rule. Roughly 1.4s per still-unmatched
+            DOI; disable for a fully offline pass.
+        max_crossref_lookups: hard ceiling on Crossref requests. Records skipped
+            because of it are reported in ``MergeStats.crossref_skipped``.
+        year_window: maximum year gap for a title-fingerprint match.
+        min_title_chars: titles shorter than this skip the fingerprint rule.
 
     Returns:
         The merged papers, newest first, and the statistics describing what was
@@ -225,7 +258,20 @@ def deduplicate(
         if published and published in doi_index:
             link(i, doi_index[published], "biorxiv-published")
 
-    # Tier 2 — ask Crossref only about records still standing alone.
+    # Rule 3 — title fingerprint, guarded by author surname and year distance.
+    # Free, so it runs before Crossref and shrinks that rule's workload.
+    buckets: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for i, paper in enumerate(papers):
+        fingerprint = title_fingerprint(paper.title)
+        if len(fingerprint) < min_title_chars:
+            continue
+        buckets[(fingerprint, _surname(paper))].append(i)
+    for members in buckets.values():
+        for a, b in zip(members, members[1:]):
+            if _years_compatible(papers[a], papers[b], year_window):
+                link(a, b, "title-fingerprint")
+
+    # Rule 4 — ask Crossref about records the free rules left standing alone.
     # Pointless with a single-source result set: a counterpart DOI can only be
     # merged if it is already in doi_index, which needs a second source. Without
     # this guard a bioRxiv-only run spends one request per paper for no merges.
@@ -249,18 +295,6 @@ def deduplicate(
                 continue
             if counterpart and counterpart in doi_index:
                 link(i, doi_index[counterpart], "crossref-relation")
-
-    # Tier 3 — title fingerprint, guarded by author surname and year distance.
-    buckets: dict[tuple[str, str], list[int]] = defaultdict(list)
-    for i, paper in enumerate(papers):
-        fingerprint = title_fingerprint(paper.title)
-        if len(fingerprint) < min_title_chars:
-            continue
-        buckets[(fingerprint, _surname(paper))].append(i)
-    for members in buckets.values():
-        for a, b in zip(members, members[1:]):
-            if _years_compatible(papers[a], papers[b], year_window):
-                link(a, b, "title-fingerprint")
 
     groups: dict[int, list[int]] = defaultdict(list)
     for i in range(len(papers)):

@@ -35,6 +35,10 @@ single-entry feed titled `Error`, surfacing the reason from its `<summary>`.
 - Timestamps in `submittedDate` are `YYYYMMDDHHMM`, UTC, inclusive on both ends.
 - Multi-word terms need quoting (`all:"protein folding"`), else arXiv splits on
   whitespace and ORs the words.
+- **Quoting does not stop hyphen splitting.** `all:"cryo-EM"` tokenises to
+  `cryo` and `EM`, so it matches "expectation-maximization" — a 30-day probe on
+  that phrase returned an earthquake-forecasting paper as its top hit. Always
+  pair keywords with a `cat:` filter, or accept cross-field noise.
 - Entries repeat across page boundaries occasionally; dedupe by id while paging.
 - arXiv asks for ≥3 seconds between requests. `_http._HOST_INTERVAL` enforces it.
 - Paper ids carry a version suffix (`2501.01234v2`). Strip it so v1 and v3 of
@@ -75,10 +79,42 @@ The same subject area comes back as `cancer biology` in one window and
 `Cancer Biology` in another, while the URL parameter wants `cancer_biology`.
 Match case- and separator-insensitively; never compare raw strings.
 
-### Pagination needs the cursor, not just a bigger limit
+### Page size is not what the cursor increments suggest
 
-Page size is fixed at 100. `messages[0].total` carries the true count. A loop
-that breaks after the first page silently caps every query at 100 results.
+`/details/` returns **30 records per page**, while `/pubs/` returns 100. Nothing
+in the response advertises a page size in advance; `messages[0].count` reports
+what you got and `messages[0].total` the true window size.
+
+Measured on `/details/biorxiv/2026-06-30/2026-07-30/{cursor}`:
+
+```
+cursor=0    count=30  total=6482
+cursor=30   count=30  total=6482
+cursor=100  count=30  total=6482
+```
+
+Assuming 100 is doubly wrong: a `len(batch) < 100` stop condition fires on the
+first page, and advancing the cursor by 100 skips 70 records per step.
+**Advance by `len(batch)` and stop against `total`.**
+
+> This exact bug shipped in v0.1 of this skill. The paragraph warning about it
+> was already here; the code used the wrong constant. Constructed tests passed
+> because the fixture returned whatever page size the test author assumed.
+> Verify page size against the live API, not against your own mock.
+
+### Records come back oldest-first
+
+Within a window the collection ascends by date, so page 1 is the **oldest**
+slice — exactly backwards for a "what's new" query. Fetching the newest *N*
+means seeking to `total - N` and reading to the end.
+
+Measured on a 7-day window (`total=1437`):
+
+| cursor | dates in page |
+|---|---|
+| 0 | 2026-07-23 |
+| 718 | 2026-07-27 |
+| 1407 | 2026-07-29 |
 
 ### DOI prefixes change
 
@@ -113,10 +149,30 @@ range like `2024 Jul-Aug`.
 2. `<PubmedData>/<History>/<PubMedPubDate PubStatus="entrez|pubmed|medline">`
 3. `<Journal>/<JournalIssue>/<PubDate>` — last resort
 
-### Bound the window server-side
+### Bound the window server-side — but know which date you bounded
 
 `esearch` accepts `datetype=edat` with `mindate`/`maxdate` (`YYYY/MM/DD`).
 Use it. Fetching a year of results to filter locally is both slow and rude.
+
+**The Entrez date is when PubMed indexed the record, not when the paper was
+published.** A seven-day `edat` window legitimately returns papers published
+months earlier — a measured run had 41% of records outside the nominal window,
+the oldest by 3.5 months, and two dated *after* it (ahead-of-print).
+
+Neither date is wrong; reporting only one is. `published_date` carries the
+publication date and `extra["entrez_date"]` the one that bounded the search, so
+a digest can say which it means rather than listing an April paper under a
+"this week" banner.
+
+### Author names are `Surname Initials`
+
+`<LastName>Falzone</LastName><Initials>ME</Initials>` renders as `Falzone ME` —
+**surname first**, unlike arXiv's `Wei Zhang`. Splitting on whitespace and
+taking the last token yields `ME`, the initials.
+
+This is not cosmetic. Dedup buckets on `(title fingerprint, surname)`; keying
+99.7% of PubMed records on their initials puts them in different buckets from
+the matching preprint, and the tier never fires. That bug also shipped in v0.1.
 
 ### Rate limits
 

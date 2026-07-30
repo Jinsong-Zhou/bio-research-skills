@@ -115,9 +115,18 @@ def _collect(
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     papers, errors, counts = _collect(args)
-    print(f"Fetched {len(papers)} records; deduplicating…", file=sys.stderr)
 
-    merged, stats = deduplicate(papers, use_crossref=not args.no_crossref)
+    # Tier 2 issues one Crossref request per unmatched DOI, so this phase can
+    # run for minutes with nothing to show. Say so, or it reads as a hang.
+    budget = 0 if args.no_crossref else min(args.max_crossref_lookups, len(papers))
+    detail = f"up to {budget} Crossref lookups, roughly {budget}s" if budget else "offline"
+    print(f"Fetched {len(papers)} records; deduplicating ({detail})…", file=sys.stderr)
+
+    merged, stats = deduplicate(
+        papers,
+        use_crossref=not args.no_crossref,
+        max_crossref_lookups=args.max_crossref_lookups,
+    )
 
     print(
         f"  {stats.duplicates_removed} duplicates merged "
@@ -208,6 +217,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-crossref", action="store_true",
         help="skip dedup tier 2; faster and fully offline, but misses "
              "preprint/journal pairs that bioRxiv has not yet linked",
+    )
+    parser.add_argument(
+        "--max-crossref-lookups", type=int, default=60,
+        help="ceiling on dedup tier-2 requests, one per unmatched DOI "
+             "(default: 60). Raise it when the run warns about skipped lookups",
     )
     return parser
 

@@ -46,6 +46,45 @@ class TestNormalisation:
         )
 
 
+class TestSurnameExtraction:
+    """Getting this wrong silently disables tier 3 for a whole source."""
+
+    @pytest.mark.parametrize(
+        ("author", "expected"),
+        [
+            ("Falzone, M.", "falzone"),  # bioRxiv: Surname, Given
+            ("Falzone ME", "falzone"),  # PubMed: Surname Initials
+            ("Zhang W", "zhang"),
+            ("Li J", "li"),
+            ("Wei Zhang", "zhang"),  # arXiv: Given Surname
+            ("John A. Smith", "smith"),
+            ("van der Waals, J.", "vanderwaals"),
+            ("", ""),
+        ],
+    )
+    def test_every_source_name_order_yields_the_surname(self, author, expected):
+        assert dedup._surname(paper("x", "", "t", authors=(author,))) == expected
+
+    def test_the_same_author_matches_across_sources(self):
+        """The bug this guards: 'Falzone ME' bucketed on 'me', never merging."""
+        biorxiv_form = dedup._surname(paper("biorxiv", "", "t", authors=("Falzone, M.",)))
+        pubmed_form = dedup._surname(paper("pubmed", "", "t", authors=("Falzone ME",)))
+        assert biorxiv_form == pubmed_form == "falzone"
+
+    def test_a_preprint_and_its_pubmed_record_merge_on_title(self):
+        """End-to-end regression for the PLCβ pair that appeared twice."""
+        title = "PLCbetas are recruited to the plasma membrane in macrophages"
+        merged, stats = deduplicate_offline(
+            [
+                paper("pubmed", "10.1073/pnas.1", title, authors=("Falzone ME",), year=2026),
+                paper("biorxiv", "10.64898/2026.01.28.702352", title,
+                      authors=("Falzone, M.",), year=2026),
+            ]
+        )
+        assert len(merged) == 1, "tier 3 must bridge PubMed and bioRxiv name formats"
+        assert stats.merges_by_tier == {"title-fingerprint": 1}
+
+
 class TestTiers:
     def test_tier0_merges_identical_dois(self):
         merged, stats = deduplicate_offline(
@@ -100,6 +139,25 @@ class TestTiers:
         assert len(merged) == 1
         assert stats.merges_by_tier == {"crossref-relation": 1}
         assert stats.crossref_lookups >= 1
+
+    def test_crossref_runs_after_the_free_rules_not_before(self, monkeypatch):
+        """It costs ~1.4s a lookup; the free title match should shrink its work."""
+        looked_up = []
+        monkeypatch.setattr(
+            dedup, "_crossref_counterpart", lambda doi: looked_up.append(doi) or ""
+        )
+        dedup.deduplicate(
+            [
+                # This pair matches on title for free — Crossref must not see it.
+                paper("biorxiv", "10.64898/a", LONG_TITLE, year=2025),
+                paper("pubmed", "10.1016/a", LONG_TITLE, authors=("Zhang W",), year=2026),
+                # This one has no free match, so it is a legitimate lookup.
+                paper("arxiv", "10.48550/b", "An unrelated paper about something else"),
+            ]
+        )
+        assert "10.64898/a" not in looked_up
+        assert "10.1016/a" not in looked_up
+        assert "10.48550/b" in looked_up
 
     def test_tier2_is_skipped_for_a_single_source_result_set(self, monkeypatch):
         """A counterpart can only merge if the other record is already present."""

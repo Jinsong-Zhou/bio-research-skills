@@ -76,14 +76,29 @@ Metabolic Disease)") and `infectious diseases` (officially "Infectious Diseases
 
 ## Picking areas for a protein / structural-biology lab
 
-A reasonable default for bioRxiv:
+Match areas to the profile — the choice drives the whole digest, and there is
+no keyword filter downstream to rescue a bad pick.
 
-```
-biochemistry  biophysics  bioinformatics  molecular biology  systems biology
-```
+| If the profile covers | Include |
+|---|---|
+| Structure, mechanism, biophysics | `biochemistry` `biophysics` `molecular biology` |
+| **Protein design, de novo binders, engineering** | **add `synthetic biology` `bioengineering`** |
+| Structure prediction, MD, computational methods | add `systems biology`, and `bioinformatics` if tool papers are wanted |
+| Cellular context, expression, trafficking | add `cell biology` `genomics` |
 
-Add `cell biology` and `genomics` for a wider net, `synthetic biology` and
-`bioengineering` for protein design work.
+Two measured cautions from a real 7-day run:
+
+- **Omitting `synthetic biology` and `bioengineering` produced a digest with
+  zero design papers**, for a profile that named protein design explicitly.
+  These are where design work is posted; the structural areas are not.
+- **`bioinformatics` is the highest-volume, lowest-yield area for a structural
+  lab.** In that run it contributed 30 records and essentially nothing
+  relevant — pipeline and tool announcements (metabarcoding, OCT segmentation,
+  genome annotation). It also consumes a full share of the fetch budget.
+  Include it only when methods development is genuinely the point.
+
+Every additional area splits `--max-per-source` further, so four areas at 200
+means 50 each. Prefer fewer, better-chosen areas over a wide sweep.
 
 ## Refreshing the lists
 

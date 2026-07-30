@@ -42,6 +42,11 @@ class TestParser:
         with pytest.raises(SystemExit):
             track.build_parser().parse_args(["--sources", "scholar"])
 
+    def test_the_flag_named_in_the_skipped_lookup_warning_exists(self):
+        """The warning told users to raise a dial that was not on the panel."""
+        args = track.build_parser().parse_args(["--max-crossref-lookups", "300"])
+        assert args.max_crossref_lookups == 300
+
     def test_keywords_and_categories_are_separate_knobs(self):
         args = track.build_parser().parse_args(
             ["--keywords", "cryo-EM", "folding", "--biorxiv-categories", "biochemistry"]
