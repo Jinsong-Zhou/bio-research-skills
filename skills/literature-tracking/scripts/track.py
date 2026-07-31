@@ -22,9 +22,9 @@ from datetime import date, timedelta
 from typing import Any
 
 from dedup import deduplicate
-from models import Paper
+from models import Paper, SearchResult
 from sources import arxiv, biorxiv, europepmc, pubmed
-from sources._http import FetchError
+from sources._http import SourceError
 
 SOURCE_CHOICES = ("arxiv", "biorxiv", "medrxiv", "pubmed", "europepmc")
 
@@ -65,43 +65,107 @@ def _collect(
     A source that fails is recorded and skipped — a broken PubMed key should
     not cost you the arXiv results — but the failure is always reported, never
     swallowed into a silently short digest.
+
+    Every requested source gets a ``coverage`` entry with a ``status``, whether
+    it ran, failed or was skipped. A source that simply vanishes from the report
+    is indistinguishable from one that returned nothing, and "nothing new this
+    week" is exactly the wrong conclusion to reach by accident.
     """
     papers: list[Paper] = []
     errors: list[dict[str, str]] = []
     coverage: dict[str, dict[str, Any]] = {}
 
-    def run(name: str, fetch) -> None:
-        try:
-            result = fetch()
-        except (
-            FetchError,
-            ValueError,
-            arxiv.ArxivQueryError,
-            europepmc.EuropePmcQueryError,
-        ) as exc:
-            errors.append({"source": name, "error": f"{type(exc).__name__}: {exc}"})
-            print(f"  {name}: FAILED — {exc}", file=sys.stderr)
+    def record(name: str, status: str, reason: str | None, result: SearchResult | None) -> None:
+        """One coverage row per requested source, however it turned out."""
+        # `is not None`, never a truthiness test: SearchResult defines __len__,
+        # so an empty-but-complete sweep is falsy and would be filed as
+        # "coverage unknown" — a source that found nothing, reported as a
+        # source we could not measure.
+        if result is None:
+            coverage[name] = {
+                "status": status,  # failed | skipped
+                "reason": reason,
+                "fetched": 0,
+                "available": None,
+                "coverage": "unknown",
+                "truncated": False,
+                "covers": None,
+                "covers_field": None,
+                "notes": [],
+            }
             return
 
         window = result.covered_range
         coverage[name] = {
+            "status": status,
+            "reason": reason,
             "fetched": len(result),
             "available": result.available,
+            # complete | truncated | unknown. `truncated` alone cannot express
+            # "the API never told us how much exists", and defaulting that to
+            # false is how a half-swept window gets written up as a finished one.
+            "coverage": result.coverage,
             "truncated": result.truncated,
             "covers": [d.isoformat() for d in window] if window else None,
+            # Which date field `covers` is measured on. PubMed searches on
+            # Entrez date, so its span is not comparable to the others'.
+            "covers_field": result.date_axis,
+            "notes": result.notes,
         }
+
+    def skip(name: str, reason: str) -> None:
+        """Record a source we chose not to query, and why."""
+        record(name, "skipped", reason, None)
+        print(f"  {name}: SKIPPED — {reason}", file=sys.stderr)
+
+    def run(name: str, fetch) -> None:
+        try:
+            result = fetch()
+        except SourceError as exc:
+            errors.append({"source": name, "error": f"{type(exc).__name__}: {exc}"})
+            record(name, "failed", str(exc), None)
+            print(f"  {name}: FAILED — {exc}", file=sys.stderr)
+            return
+        except Exception as exc:  # noqa: BLE001 — deliberate, see below
+            # A KeyError or AttributeError here means an upstream field moved,
+            # not that the source is down. Tolerating it keeps the other four
+            # sources' results, which is the whole contract of this function —
+            # but it is a defect, so it says so rather than reading like an
+            # outage, and it names the type so the cause is reconstructable.
+            errors.append(
+                {
+                    "source": name,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "kind": "unexpected — a payload shape change or a bug in the adapter",
+                }
+            )
+            record(name, "failed", f"{type(exc).__name__}: {exc}", None)
+            print(f"  {name}: FAILED (unexpected {type(exc).__name__}) — {exc}", file=sys.stderr)
+            return
+
+        record(name, "ok", None, result)
         papers.extend(result.papers)
 
         line = f"  {name}: {len(result)} papers"
         if result.available is not None:
             line += f" of {result.available}"
+        elif result.coverage == "unknown":
+            line += " (source reported no total — coverage unknown)"
         print(line, file=sys.stderr)
+        for note in result.notes:
+            print(f"    NOTE: {note}", file=sys.stderr)
 
         if result.truncated and result.available is not None:
             # Every one of these APIs returns its newest slice first, so a
             # truncated fetch does not sample the window — it drops the early
-            # days wholesale. Say which days actually survived.
-            span = f" — only covers {window[0]} .. {window[1]}" if window else ""
+            # days wholesale. Say which days actually survived, and on which
+            # date field, or a PubMed span reads as wider than the window.
+            covered = result.covered_range
+            span = (
+                f" — only covers {covered[0]} .. {covered[1]} by {result.date_axis}"
+                if covered
+                else ""
+            )
             print(
                 f"    TRUNCATED: {result.available - len(result)} more exist{span}. "
                 f"Raise --max-per-source or narrow the query",
@@ -155,18 +219,35 @@ def _collect(
 
     # The keyword channel onto the preprint servers. Needs keywords by
     # definition, and only makes sense for servers we are already tracking.
-    servers = [s for s in ("biorxiv", "medrxiv") if s in args.sources]
-    if "europepmc" in args.sources and args.keywords and servers:
-        run(
-            "europepmc",
-            lambda: europepmc.search(
-                keywords=args.keywords,
-                since=args.since,
-                until=args.until,
-                publishers=servers,
-                max_results=args.max_per_source,
-            ),
-        )
+    # Both preconditions are real, but neither may fail *quietly*: this channel
+    # is the only relevance signal in the report, so an agent that sees
+    # `keyword_matched: 0` with no explanation concludes "nothing matched your
+    # interests" when in fact nothing was ever searched.
+    if "europepmc" in args.sources:
+        servers = [s for s in ("biorxiv", "medrxiv") if s in args.sources]
+        if not args.keywords:
+            skip(
+                "europepmc",
+                "no --keywords given, and this is the keyword channel — it has "
+                "nothing to search for. Pass --keywords to enable it",
+            )
+        elif not servers:
+            skip(
+                "europepmc",
+                "neither biorxiv nor medrxiv is in --sources; this channel only "
+                "indexes those preprint servers. Add one to --sources",
+            )
+        else:
+            run(
+                "europepmc",
+                lambda: europepmc.search(
+                    keywords=args.keywords,
+                    since=args.since,
+                    until=args.until,
+                    publishers=servers,
+                    max_results=args.max_per_source,
+                ),
+            )
 
     return papers, errors, coverage
 
@@ -201,7 +282,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     # Each Crossref request takes over a second, so this phase can run for
     # minutes with nothing to show. Say so, or it reads as a hang.
     budget = min(args.max_crossref_lookups, len(papers)) if use_crossref else 0
-    detail = f"up to {budget} Crossref lookups, roughly {budget}s" if budget else "offline"
+    detail = (
+        f"up to {budget} Crossref lookups, roughly {round(budget * 1.4)}s" if budget else "offline"
+    )
     print(f"Fetched {len(papers)} records; deduplicating ({detail})…", file=sys.stderr)
 
     merged, stats = deduplicate(
@@ -227,9 +310,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
     if stats.crossref_skipped:
         print(
-            f"  WARNING: {stats.crossref_skipped} records skipped tier-2 lookup "
+            f"  WARNING: {stats.crossref_skipped} records skipped the rule 4 lookup "
             f"(--max-crossref-lookups reached); some preprint/journal pairs may "
             f"still appear twice",
+            file=sys.stderr,
+        )
+    if stats.unknown_sources:
+        print(
+            f"  WARNING: unknown source(s) {', '.join(stats.unknown_sources)} rank below "
+            f"every known one and will lose the primary slot in any merge",
             file=sys.stderr,
         )
 
@@ -251,6 +340,17 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "coverage_by_source": coverage,
             "fetched_by_source": {k: v["fetched"] for k, v in coverage.items()},
             "truncated_sources": [k for k, v in coverage.items() if v["truncated"]],
+            # Ran, but could not say how much existed — so "not truncated" is
+            # an absence of evidence, not a complete sweep. Skipped sources are
+            # listed separately below rather than doubled up here.
+            "unknown_coverage_sources": [
+                k
+                for k, v in coverage.items()
+                if v["status"] == "ok" and v["coverage"] == "unknown"
+            ],
+            "skipped_sources": {
+                k: v["reason"] for k, v in coverage.items() if v["status"] == "skipped"
+            },
             "fetched_total": stats.papers_in,
             "unique_total": stats.papers_out,
             "keyword_matched": flagged,
@@ -259,9 +359,20 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             # Rules that agreed with a cheaper one still count here, so a rule
             # can be seen working even when it created no new merge.
             "rule_matches": stats.rule_matches,
-            "crossref_lookups": stats.crossref_lookups,
-            "crossref_failures": stats.crossref_failures,
-            "crossref_skipped": stats.crossref_skipped,
+            # Whether rule 4 ran at all. Without this, `crossref_lookups: 0`
+            # is byte-identical to "we ran it and found nothing to look up" —
+            # and with the default 7-day window `auto` always turns it off, so
+            # that is the state most runs are actually in.
+            "crossref": {
+                "requested": args.crossref,
+                "enabled": use_crossref,
+                "reason": reason or None,
+                "lookups": stats.crossref_lookups,
+                "failures": stats.crossref_failures,
+                "skipped": stats.crossref_skipped,
+            },
+            # Sources ranked below every known one; they lose merges silently.
+            "unknown_sources": stats.unknown_sources,
         },
         # Present even when empty, so a caller can tell "nothing new" apart from
         # "three of four sources fell over".
@@ -283,7 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--until", type=parse_since, default=None,
-        help="window end as an ISO date (default: today)",
+        help="window end: an ISO date, or a relative form like 7d meaning that "
+             "many days ago — the same grammar as --since (default: today)",
     )
     parser.add_argument(
         "--sources", nargs="+", choices=SOURCE_CHOICES,
@@ -292,9 +404,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--keywords", nargs="+", default=None,
-        help="terms ORed together for arXiv, PubMed and Europe PMC. The bioRxiv "
-             "and medRxiv APIs ignore them — no keyword search exists there, "
-             "which is what the europepmc channel is for; use categories",
+        help="terms ORed together for PubMed and Europe PMC. NOT arXiv — see "
+             "--arxiv-keywords. The bioRxiv and medRxiv APIs have no keyword "
+             "search at all, which is what the europepmc channel is for; filter "
+             "those two by category instead",
     )
     parser.add_argument(
         "--arxiv-categories", nargs="+", default=None,
@@ -338,18 +451,52 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def check_usage(args: argparse.Namespace) -> str | None:
+    """Catch configuration mistakes before any network I/O. Return the message.
+
+    These are caller errors, not source failures, so they stop the run instead
+    of being tolerated the way an outage is. A mistyped subject area used to be
+    swallowed into ``errors[]`` and the run exited 0 with that source silently
+    absent — a plausible digest built on a query nobody actually made.
+    """
+    if args.since > args.until:
+        return f"--since ({args.since}) is after --until ({args.until})"
+
+    for server in ("biorxiv", "medrxiv"):
+        categories = getattr(args, f"{server}_categories")
+        if categories and server not in args.sources:
+            return (
+                f"--{server}-categories was given but {server!r} is not in --sources "
+                f"({' '.join(args.sources)}), so those categories would be silently "
+                f"ignored. Add '{server}' to --sources"
+            )
+        # Resolve up front: the API answers an unknown subject area with HTTP
+        # 200 and every paper in the window, so this has to fail before we ask.
+        for category in categories or []:
+            try:
+                biorxiv.resolve_category(category, server)
+            except biorxiv.UnknownCategoryError as exc:
+                return str(exc)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     args.until = args.until or date.today()
-    if args.since > args.until:
-        print(f"error: --since ({args.since}) is after --until ({args.until})", file=sys.stderr)
+    if (problem := check_usage(args)) is not None:
+        print(f"error: {problem}", file=sys.stderr)
         return 2
 
     report = build_report(args)
     json.dump(report, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
-    # Every source failing is a failure, even though the JSON is well-formed.
-    return 1 if report["errors"] and not report["papers"] else 0
+
+    # Exit 1 only when nothing worked. A quiet week with one flaky source is
+    # not a failed run, and conflating the two is what makes "no new papers"
+    # indistinguishable from "everything fell over" — the exact distinction
+    # `errors` exists to preserve.
+    ran = [c for c in report["stats"]["coverage_by_source"].values() if c["status"] != "skipped"]
+    return 1 if ran and all(c["status"] == "failed" for c in ran) else 0
 
 
 if __name__ == "__main__":

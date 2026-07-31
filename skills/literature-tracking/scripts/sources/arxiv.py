@@ -15,7 +15,7 @@ from xml.etree import ElementTree as ET
 
 from models import Paper, SearchResult
 
-from ._http import fetch_xml
+from ._http import SourceError, fetch_xml
 
 BASE_URL = "https://export.arxiv.org/api/query"
 PAGE_SIZE = 100
@@ -42,7 +42,7 @@ QBIO_CATEGORIES = (
 )
 
 
-class ArxivQueryError(RuntimeError):
+class ArxivQueryError(SourceError):
     """arXiv rejected the query and said so inside a 200 response."""
 
 

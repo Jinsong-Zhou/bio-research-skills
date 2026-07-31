@@ -32,21 +32,31 @@ fingerprint, then Crossref's `is-preprint-of`/`has-preprint` relations.
 
 Dedup also does double duty as a relevance signal. bioRxiv has no keyword
 search — you can filter by subject area and nothing else — so Europe PMC runs
-as a second, keyword-searchable view of the same preprints. It only covers
-~70% of them and lags a day, so it supplements rather than replaces the direct
+as a second, keyword-searchable view of the same preprints. Measured coverage
+ran 43–78% across five days (66% overall) with about a day of indexing lag, and
+the newest day — the one a tracking query is for — is the worst covered. So it
+supplements rather than replaces the direct
 sweep; but the two views share DOIs, so they merge, and whatever came through
 the keyword channel is flagged `keyword_match`. Nothing is dropped, and the
 agent knows where to start reading.
 
 It also refuses to fail silently. Each of these returns **HTTP 200**:
 
-- arXiv answers a malformed query with a one-entry feed titled `Error`
 - bioRxiv **ignores an unknown subject area** and returns every paper in the
   window — real papers, real DOIs, entirely unrelated to what you asked
 - bioRxiv also pages at 30, not the 100 its cursor implies, **oldest first** —
   so a naive read returns the stalest slice of the window
 - PubMed's `<PubDate>` is often year-only, putting every record on 1 January
+- PubMed bounds the search on the *Entrez* date but reports the *publication*
+  date, so a 7-day window legitimately returns papers months old
 - Europe PMC drops query clauses it cannot parse and answers 200 anyway
+- Europe PMC also leaves inline HTML in titles (`peptidyl-prolyl
+  <i>cis-trans</i> …`), which quietly stops them matching the same paper
+  fetched from bioRxiv
+- arXiv answers a query with an unknown field prefix with 0 results — the same
+  answer as a quiet week. (It used to answer a malformed *structured* query
+  with a one-entry feed titled `Error`; as of 2026-07-30 that one is an
+  HTTP 400, which the live tests caught.)
 
 Each has a guard, each is documented with measured evidence in
 [`references/source-quirks.md`](skills/literature-tracking/references/source-quirks.md).
@@ -138,9 +148,10 @@ skills/
     scripts/          # bundled tooling
     references/       # per-API notes, loaded on demand
     tests/
-  paper-deep-reading/
-  code-reproduction/
 ```
+
+`paper-deep-reading/` and `code-reproduction/` will sit alongside it; neither
+exists yet.
 
 Each skill folder carries a `SKILL.md` with YAML frontmatter (`name`, `description`).
 Skills are self-contained: no shared runtime, install one without the others.
@@ -182,12 +193,12 @@ changes something, those tests fail and say which guard needs a look.
 
 - **[openags/paper-search-mcp](https://github.com/openags/paper-search-mcp)**
   (MIT) — the `Paper` record schema here mirrors its field names so records stay
-  interchangeable, and its `_paper_unique_key` is the baseline our dedup tier 0
+  interchangeable, and its `_paper_unique_key` is the baseline our dedup rule 1
   reimplements. It remains the better tool for ad-hoc keyword search across 20+
   sources; this skill is narrower on purpose, covering the date-windowed
   tracking case its API surface does not expose.
 - **[RainerSeventeen/paper-tracker](https://github.com/RainerSeventeen/paper-tracker)**
-  (MIT) — dedup tier 3 follows the approach in its `core/dedup.py`: normalised
+  (MIT) — dedup rule 3 follows the approach in its `core/dedup.py`: normalised
   DOI, title + first-author + year fingerprint, minimum-length guard, and
   source-rank primary selection.
 - **[Scholar Inbox](https://arxiv.org/abs/2504.08385)** (Krishnan et al.,

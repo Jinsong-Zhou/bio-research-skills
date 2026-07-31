@@ -1,12 +1,21 @@
-"""CLI argument handling and report assembly, fully offline."""
+"""CLI argument handling and report assembly, fully offline.
 
+"Fully offline" is enforced, not asserted: ``conftest._no_network`` fails any
+test here that opens a socket. Two tests in this file used to reach ebi.ac.uk
+and pass either way, because ``_collect`` folds the resulting ``FetchError``
+into ``report["errors"]`` and nothing checked that list was empty.
+"""
+
+import json
 from datetime import date, timedelta
 
 import pytest
 import track
 from models import Paper, SearchResult
+from sources._http import FetchError
 
 TODAY = date(2026, 7, 30)
+ALL_SOURCES = ("arxiv", "biorxiv", "pubmed", "europepmc")
 
 
 class TestParseSince:
@@ -90,6 +99,19 @@ class TestCrossrefAuto:
 
 
 class TestReport:
+    @pytest.fixture(autouse=True)
+    def _stub_every_source(self, monkeypatch):
+        """Every source returns nothing unless a test says otherwise.
+
+        Stubbing only the sources a test cares about leaves the rest reaching
+        for the real API — which is how two tests in this file ended up making
+        live requests while claiming to be offline.
+        """
+        for name in ALL_SOURCES:
+            monkeypatch.setattr(
+                getattr(track, name), "search", lambda **kw: SearchResult([], available=0)
+            )
+
     def _args(self, **overrides):
         args = track.build_parser().parse_args([])
         args.since, args.until = date(2026, 7, 23), TODAY
@@ -112,15 +134,42 @@ class TestReport:
         monkeypatch.setattr(
             track.biorxiv,
             "search",
-            lambda **kw: (_ for _ in ()).throw(track.FetchError("bioRxiv is down")),
+            lambda **kw: (_ for _ in ()).throw(FetchError("bioRxiv is down")),
         )
-        monkeypatch.setattr(track.pubmed, "search", lambda **kw: SearchResult([]))
 
         report = track.build_report(self._args(crossref="off"))
 
         assert len(report["papers"]) == 1
         assert [e["source"] for e in report["errors"]] == ["biorxiv"]
         assert "bioRxiv is down" in report["errors"][0]["error"]
+        assert report["stats"]["coverage_by_source"]["biorxiv"]["status"] == "failed"
+        assert report["stats"]["coverage_by_source"]["arxiv"]["status"] == "ok"
+
+    def test_an_adapter_bug_is_tolerated_but_labelled_as_one(self, monkeypatch):
+        """A renamed upstream field raises KeyError, not FetchError.
+
+        Letting that escape would discard every source already fetched. Folding
+        it in silently would report a code defect as an outage — so it is kept,
+        and marked.
+        """
+        monkeypatch.setattr(
+            track.arxiv,
+            "search",
+            lambda **kw: SearchResult([self._paper("arxiv", "10.1/a", "A study of X")]),
+        )
+        monkeypatch.setattr(
+            track.pubmed,
+            "search",
+            lambda **kw: (_ for _ in ()).throw(KeyError("authorList")),
+        )
+
+        report = track.build_report(self._args(crossref="off"))
+
+        assert len(report["papers"]) == 1, "the arXiv results must survive"
+        (failure,) = report["errors"]
+        assert failure["source"] == "pubmed"
+        assert "KeyError" in failure["error"]
+        assert "unexpected" in failure["kind"], "a bug must not read as an outage"
 
     def test_errors_key_is_present_even_on_a_clean_run(self, monkeypatch):
         """Callers need to tell 'nothing new' from 'three sources fell over'."""
@@ -176,10 +225,15 @@ class TestReport:
         assert report["stats"]["truncated_sources"] == ["pubmed"]
         pubmed_coverage = report["stats"]["coverage_by_source"]["pubmed"]
         assert pubmed_coverage == {
+            "status": "ok",
+            "reason": None,
             "fetched": 3,
             "available": 556,
+            "coverage": "truncated",
             "truncated": True,
             "covers": [TODAY.isoformat(), TODAY.isoformat()],
+            "covers_field": "published_date",
+            "notes": [],
         }
 
     def test_a_complete_sweep_is_not_flagged(self, monkeypatch):
@@ -212,3 +266,168 @@ class TestMain:
     def test_an_inverted_window_exits_with_a_usage_error(self, capsys):
         assert track.main(["--since", "2026-07-30", "--until", "2026-07-01"]) == 2
         assert "is after" in capsys.readouterr().err
+
+
+class TestSourcesNeverVanishSilently:
+    """A requested source that does not run must say so, in the JSON.
+
+    `keyword_matched: 0` with no explanation reads as "nothing this week matched
+    your interests" — the wrong conclusion, confidently drawn, when the keyword
+    channel was never opened at all.
+    """
+
+    def _args(self, **overrides):
+        args = track.build_parser().parse_args([])
+        args.since, args.until = date(2026, 7, 23), TODAY
+        args.crossref = "off"
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    @pytest.fixture(autouse=True)
+    def _stub(self, monkeypatch):
+        for name in ALL_SOURCES:
+            monkeypatch.setattr(
+                getattr(track, name), "search", lambda **kw: SearchResult([], available=0)
+            )
+
+    def test_europepmc_without_keywords_is_recorded_as_skipped(self):
+        report = track.build_report(self._args(keywords=None))
+        coverage = report["stats"]["coverage_by_source"]["europepmc"]
+        assert coverage["status"] == "skipped"
+        assert "--keywords" in coverage["reason"]
+        assert "europepmc" in report["stats"]["skipped_sources"]
+
+    def test_europepmc_without_a_preprint_server_is_recorded_as_skipped(self):
+        report = track.build_report(
+            self._args(keywords=["cryo-EM"], sources=["arxiv", "pubmed", "europepmc"])
+        )
+        coverage = report["stats"]["coverage_by_source"]["europepmc"]
+        assert coverage["status"] == "skipped"
+        assert "--sources" in coverage["reason"]
+
+    def test_every_requested_source_gets_a_row(self):
+        report = track.build_report(self._args(keywords=["cryo-EM"]))
+        assert set(report["stats"]["coverage_by_source"]) == set(ALL_SOURCES)
+
+    def test_unknown_coverage_is_listed_separately_from_truncation(self, monkeypatch):
+        """"We don't know how much exists" is not "we got it all".
+
+        `truncated` is false in both cases, so without this list an unmeasured
+        sweep passes the same check a complete one does.
+        """
+        monkeypatch.setattr(
+            track.arxiv, "search", lambda **kw: SearchResult([], available=None)
+        )
+        report = track.build_report(self._args())
+        assert report["stats"]["unknown_coverage_sources"] == ["arxiv"]
+        assert report["stats"]["truncated_sources"] == []
+
+    def test_an_empty_but_complete_sweep_is_not_called_unknown(self):
+        """SearchResult defines __len__, so an empty result is falsy.
+
+        A truthiness test on it files every quiet source as unmeasurable.
+        """
+        report = track.build_report(self._args())
+        biorxiv_coverage = report["stats"]["coverage_by_source"]["biorxiv"]
+        assert biorxiv_coverage["coverage"] == "complete"
+        assert report["stats"]["unknown_coverage_sources"] == []
+
+
+class TestCrossrefDecisionIsVisible:
+    def _args(self, **overrides):
+        args = track.build_parser().parse_args([])
+        args.since, args.until = date(2026, 7, 23), TODAY
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    @pytest.fixture(autouse=True)
+    def _stub(self, monkeypatch):
+        for name in ALL_SOURCES:
+            monkeypatch.setattr(
+                getattr(track, name), "search", lambda **kw: SearchResult([], available=0)
+            )
+
+    def test_auto_off_says_so_in_the_json_not_only_on_stderr(self):
+        """`lookups: 0` alone cannot distinguish "off" from "ran, found nothing".
+
+        With the default 7-day window auto always turns rule 4 off, so that is
+        the state most runs are actually in.
+        """
+        report = track.build_report(self._args(crossref="auto"))
+        crossref = report["stats"]["crossref"]
+        assert crossref["enabled"] is False
+        assert crossref["requested"] == "auto"
+        assert "60 days" in crossref["reason"]
+        assert crossref["lookups"] == 0
+
+    def test_a_run_that_did_use_it_reports_no_reason(self):
+        report = track.build_report(self._args(crossref="on"))
+        assert report["stats"]["crossref"]["enabled"] is True
+        assert report["stats"]["crossref"]["reason"] is None
+
+
+class TestExitContract:
+    @pytest.fixture(autouse=True)
+    def _stub(self, monkeypatch):
+        for name in ALL_SOURCES:
+            monkeypatch.setattr(
+                getattr(track, name), "search", lambda **kw: SearchResult([], available=0)
+            )
+
+    def test_stdout_is_parseable_json(self, capsys):
+        """The whole output contract, and nothing asserted it.
+
+        A stray print() to stdout instead of stderr ships green otherwise.
+        """
+        assert track.main(["--crossref", "off"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert set(payload) == {"query", "stats", "errors", "papers"}
+
+    def test_a_quiet_week_with_one_flaky_source_is_not_a_failed_run(self, monkeypatch, capsys):
+        """Exit 1 there would conflate "nothing new" with "everything fell over"."""
+        monkeypatch.setattr(
+            track.pubmed,
+            "search",
+            lambda **kw: (_ for _ in ()).throw(FetchError("PubMed timed out")),
+        )
+        assert track.main(["--crossref", "off"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["errors"], "the failure must still be reported"
+
+    def test_every_source_failing_is_a_failed_run(self, monkeypatch, capsys):
+        for name in ALL_SOURCES:
+            monkeypatch.setattr(
+                getattr(track, name),
+                "search",
+                lambda **kw: (_ for _ in ()).throw(FetchError("down")),
+            )
+        assert track.main(["--crossref", "off", "--keywords", "cryo-EM"]) == 1
+        capsys.readouterr()
+
+
+class TestUsageErrorsStopTheRun:
+    """Config mistakes are known before any I/O and must not be tolerated.
+
+    Swallowing them into errors[] produced a plausible digest built on a query
+    nobody actually made, and exited 0.
+    """
+
+    def test_a_mistyped_subject_area_exits_two_with_a_suggestion(self, capsys):
+        assert track.main(["--biorxiv-categories", "biochemstry"]) == 2
+        err = capsys.readouterr().err
+        assert "not a biorxiv subject area" in err
+        assert "biochemistry" in err, "close matches make the fix obvious"
+
+    def test_categories_for_an_unselected_source_are_a_usage_error(self, capsys):
+        """Otherwise the report echoes them back as though medRxiv was searched."""
+        assert track.main(["--medrxiv-categories", "oncology"]) == 2
+        assert "not in --sources" in capsys.readouterr().err
+
+    def test_the_same_categories_are_fine_once_the_source_is_selected(self):
+        args = track.build_parser().parse_args(
+            ["--sources", "medrxiv", "--medrxiv-categories", "oncology"]
+        )
+        args.until = TODAY
+        assert track.check_usage(args) is None

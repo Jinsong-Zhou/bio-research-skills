@@ -35,7 +35,21 @@ _DEFAULT_INTERVAL = 0.5
 _last_call: dict[str, float] = {}
 
 
-class FetchError(RuntimeError):
+class SourceError(RuntimeError):
+    """A source could not be queried.
+
+    Base for every "this source failed, carry on with the others" condition, so
+    a caller can catch the category instead of enumerating its members. The
+    enumeration is what rots: adding a sixth adapter with its own error type
+    used to mean the orchestrator silently stopped tolerating it, and one
+    source's failure took down a run that had already fetched four others.
+
+    Deliberately *not* a base for caller errors like an unknown subject area —
+    those are config mistakes and should stop the run, not be tolerated.
+    """
+
+
+class FetchError(SourceError):
     """Transport-level failure that survived every retry."""
 
 

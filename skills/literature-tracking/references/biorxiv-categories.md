@@ -10,7 +10,8 @@ inconsistent between records, so never compare raw strings.
 
 The lists below are supersets of what a sampling run observes — rare and
 retired areas are kept so old records still resolve.
-`tests/test_categories.py` checks the live API stays within them.
+`tests/test_sources.py::TestLiveBehaviour::test_sampled_categories_stay_within_the_whitelist`
+checks the live API stays within them (`uv run pytest -m live`).
 
 ## bioRxiv (27)
 
@@ -91,11 +92,14 @@ Two measured cautions from a real 7-day run:
 - **Omitting `synthetic biology` and `bioengineering` produced a digest with
   zero design papers**, for a profile that named protein design explicitly.
   These are where design work is posted; the structural areas are not.
-- **`bioinformatics` is the highest-volume, lowest-yield area for a structural
-  lab.** In that run it contributed 30 records and essentially nothing
-  relevant — pipeline and tool announcements (metabarcoding, OCT segmentation,
-  genome annotation). It also consumes a full share of the fetch budget.
-  Include it only when methods development is genuinely the point.
+- **`bioinformatics` was the lowest-yield area for a structural lab.** What it
+  returned was pipeline and tool announcements — metabarcoding, OCT
+  segmentation, genome annotation — and essentially nothing relevant. Treat the
+  *kind* of paper as the finding and not the count: that run predates the
+  pagination fix, so its 30 records were one page rather than the 50 its share
+  of the budget allowed, and re-running will not reproduce the number. It still
+  consumes a full share of the fetch budget, so include it when methods
+  development is genuinely the point.
 
 Every additional area splits `--max-per-source` further, so four areas at 200
 means 50 each. Prefer fewer, better-chosen areas over a wide sweep.

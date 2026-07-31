@@ -1,9 +1,9 @@
 """Europe PMC as a keyword-searchable window onto preprint servers.
 
 bioRxiv and medRxiv have no keyword search of their own — you can filter by
-subject area and nothing else, so a category sweep is ~95% noise for any
-specific interest. Europe PMC indexes those same preprints *and* supports full
-text search with a date range, which fills exactly that gap.
+subject area and nothing else, so a category sweep returns mostly papers
+outside any specific interest. Europe PMC indexes those same preprints *and*
+supports full text search with a date range, which fills exactly that gap.
 
 It is a **complement, not a replacement**. Measured against the bioRxiv API on
 2026-07-30:
@@ -32,7 +32,7 @@ from datetime import date, datetime
 
 from models import Paper, SearchResult
 
-from ._http import FetchError, fetch_json
+from ._http import FetchError, SourceError, fetch_json
 
 BASE_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 PAGE_SIZE = 100
@@ -47,7 +47,7 @@ PUBLISHERS = {"biorxiv": "bioRxiv", "medrxiv": "medRxiv"}
 _SYNTAX_CHARS = re.compile(r'["()\[\]{}:^~*?\\]')
 
 
-class EuropePmcQueryError(RuntimeError):
+class EuropePmcQueryError(SourceError):
     """Europe PMC did not run the query we sent."""
 
 
@@ -83,12 +83,47 @@ def _check_query_echo(payload: dict, sent: str) -> None:
     It silently drops clauses it cannot parse — an unbalanced bracket returns
     thousands of unrelated hits under HTTP 200 — but it echoes the query it
     actually used, so comparing the two catches the mangling.
+
+    Fails **closed**. A missing or renamed ``request.queryString`` is what an
+    upstream schema change looks like, and treating it as "nothing to compare,
+    carry on" would disable the guard at exactly the moment it is needed —
+    while every record still gets stamped ``keyword_match``, so the unrelated
+    results arrive flagged as the ones to read first.
     """
-    echoed = (payload.get("request") or {}).get("queryString", "")
-    if echoed and " ".join(echoed.split()) != " ".join(sent.split()):
+    request = payload.get("request")
+    echoed = request.get("queryString") if isinstance(request, dict) else None
+    if not echoed:
+        raise EuropePmcQueryError(
+            "Europe PMC did not echo the query it ran (no request.queryString "
+            "in the response), so we cannot tell whether it dropped a clause. "
+            f"Sent: {sent}"
+        )
+    if " ".join(str(echoed).split()) != " ".join(sent.split()):
         raise EuropePmcQueryError(
             f"Europe PMC rewrote the query.\n  sent:   {sent}\n  ran:    {echoed}"
         )
+
+
+#: Europe PMC returns titles and abstracts with inline markup left in:
+#: ``peptidyl-prolyl <i>cis-trans</i> isomerization``. bioRxiv returns the same
+#: title as plain text.
+_MARKUP = re.compile(r"<[^>]+>")
+
+
+def _strip_markup(text: str) -> str:
+    """Remove inline HTML so titles compare equal across sources.
+
+    Not cosmetic. ``dedup.title_fingerprint`` keeps only letters and digits, so
+    an ``<i>`` survives as a literal ``i`` wedged into the middle of the
+    fingerprint — and the title rule silently stops matching that record
+    against its bioRxiv twin. Measured on a real pair: the two merged on DOI
+    alone while every other duplicate in the run matched on both rules.
+
+    Tags are deleted rather than replaced with a space — these are inline
+    formatting spans, so ``<sup>13</sup>C`` has to come back as ``13C``, and
+    the real spaces around a phrase like ``<i>cis-trans</i>`` are already there.
+    """
+    return " ".join(_MARKUP.sub("", text or "").split())
 
 
 def _parse_date(raw: str) -> date | None:
@@ -114,9 +149,9 @@ def _to_paper(record: dict) -> Paper:
     url = f"https://doi.org/{doi}" if doi else f"https://europepmc.org/article/PPR/{record_id}"
     return Paper(
         paper_id=record_id,
-        title=" ".join((record.get("title") or "").split()),
+        title=_strip_markup(record.get("title") or ""),
         authors=_authors(record),
-        abstract=" ".join((record.get("abstractText") or "").split()),
+        abstract=_strip_markup(record.get("abstractText") or ""),
         doi=doi,
         published_date=_parse_date(record.get("firstPublicationDate", "")),
         url=url,

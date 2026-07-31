@@ -41,7 +41,8 @@ SERVERS = ("biorxiv", "medrxiv")
 
 #: Subject areas accepted by each server, as returned by the API. Kept as
 #: canonical display strings; matching is case- and separator-insensitive.
-#: ``tests/test_categories.py`` re-checks these against the live API.
+#: ``tests/test_sources.py::TestLiveBehaviour`` re-checks these against the
+#: live API.
 CATEGORIES: dict[str, tuple[str, ...]] = {
     "biorxiv": (
         "animal behavior and cognition",
@@ -188,19 +189,32 @@ def _to_paper(item: dict, server: str) -> Paper:
         extra={
             "version": version,
             # Populated by bioRxiv once the preprint appears in a journal —
-            # this is dedup tier 1 (see dedup.py), free with the record.
+            # this is dedup rule 2 (see dedup.py), free with the record.
             "published_doi": published_doi,
             "preprint_server": server,
         },
     )
 
 
+def _version_number(paper: Paper) -> int:
+    """Version as an int, defaulting to 1. Never raises on a malformed value."""
+    try:
+        return int(str(paper.extra.get("version", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _collapse_versions(papers: list[Paper]) -> list[Paper]:
-    """Keep only the newest version of each DOI."""
+    """Keep only the newest version of each DOI.
+
+    This is why ``available`` cannot be compared against ``len(papers)``
+    directly: the API counts *version rows*, and this throws the superseded
+    ones away. See ``search``.
+    """
     best: dict[str, Paper] = {}
     for paper in papers:
         current = best.get(paper.doi)
-        if current is None or int(paper.extra["version"]) > int(current.extra["version"]):
+        if current is None or _version_number(paper) > _version_number(current):
             best[paper.doi] = paper
     return list(best.values())
 
@@ -214,41 +228,78 @@ def _reported_total(payload: dict) -> int | None:
         return None
 
 
+def _newest(rows: list[dict], limit: int) -> list[dict]:
+    """The newest ``limit`` rows.
+
+    Rows arrive **oldest first**, so the newest are at the *end*. Slicing from
+    the front — the intuitive ``rows[:limit]`` — returns the stalest part of
+    the window while looking entirely correct, which is exactly the bug the
+    tail-seek in ``_fetch_category`` exists to prevent.
+    """
+    return rows[-limit:] if len(rows) > limit else rows
+
+
+def _walk(window: str, params: dict, start: int, stop: int | None, first: list[dict]) -> list[dict]:
+    """Read rows from ``start`` until ``stop`` (or the collection runs dry)."""
+    rows: list[dict] = []
+    cursor = start
+    for _ in range(MAX_PAGES):
+        if stop is not None and cursor >= stop:
+            break
+        batch = first if cursor == 0 and first else fetch_json(f"{window}/{cursor}", params).get(
+            "collection", []
+        )
+        if not batch:
+            break
+        rows.extend(batch)
+        cursor += len(batch)  # never a hardcoded page size
+        first = []
+    return rows
+
+
 def _fetch_category(
     server: str, since: date, until: date, category: str | None, limit: int
-) -> tuple[list[Paper], int | None]:
-    """Fetch up to ``limit`` of the *newest* records, plus the window's true size.
+) -> tuple[list[Paper], int | None, bool]:
+    """Fetch up to ``limit`` of the *newest* records in the window.
 
     The API paginates oldest-first, so once the window holds more than we want
     we seek to ``total - limit`` and read to the end rather than taking page 1.
+
+    Returns:
+        The papers, the window's true **row** count (``None`` when the API did
+        not report one), and whether every row in the window was returned. The
+        caller needs that last flag: rows are version rows, so comparing the
+        count against the collapsed paper list reports a complete sweep as
+        truncated.
     """
     window = f"{BASE_URL}/{server}/{since:%Y-%m-%d}/{until:%Y-%m-%d}"
     params = {"category": category}
 
     probe = fetch_json(f"{window}/0", params)
     first_batch = probe.get("collection", [])
-    if not first_batch:
-        return [], _reported_total(probe) or 0
-
     total = _reported_total(probe)
-    if total is None or total <= len(first_batch):
-        return [_to_paper(item, server) for item in first_batch[:limit]], total
+    if not first_batch:
+        return [], 0 if total is None else total, True
+
+    if total is None:
+        # Unknown size, so we cannot seek. Walk the whole window and keep the
+        # tail: returning page 0 would hand back the oldest slice while
+        # reporting nothing amiss. Costs requests; correctness is worth them.
+        rows = _walk(window, params, 0, None, first_batch)
+        return [_to_paper(r, server) for r in _newest(rows, limit)], None, len(rows) <= limit
+
+    if total <= len(first_batch):
+        # The whole window came back in one page.
+        return (
+            [_to_paper(r, server) for r in _newest(first_batch, limit)],
+            total,
+            len(first_batch) <= limit,
+        )
 
     # Seek to the tail. Re-reading page 0 is only wasteful when the window is
     # small, and correctness beats saving one request.
-    cursor = max(0, total - limit)
-    papers: list[Paper] = []
-    for _ in range(MAX_PAGES):
-        if cursor >= total:
-            break
-        payload = fetch_json(f"{window}/{cursor}", params)
-        batch = payload.get("collection", [])
-        if not batch:
-            break
-        papers.extend(_to_paper(item, server) for item in batch)
-        cursor += len(batch)  # never a hardcoded page size
-
-    return (papers[-limit:] if len(papers) > limit else papers), total
+    rows = _walk(window, params, max(0, total - limit), total, [])
+    return [_to_paper(r, server) for r in _newest(rows, limit)], total, total <= limit
 
 
 def search(
@@ -280,12 +331,34 @@ def search(
     per_category = max(1, max_results // len(resolved))
 
     collected: list[Paper] = []
-    available = 0
+    total_rows = 0
+    totals_known = True
+    complete = True
     for category in resolved:
-        found, total = _fetch_category(server, since, until, category, per_category)
+        found, total, cat_complete = _fetch_category(server, since, until, category, per_category)
         collected.extend(found)
-        available += total or 0
+        if total is None:
+            totals_known = False
+        else:
+            total_rows += total
+        complete = complete and cat_complete
 
     papers = _collapse_versions(collected)
     papers.sort(key=lambda p: (p.published_date or date.min), reverse=True)
-    return SearchResult(papers[:max_results], available)
+    if len(papers) > max_results:
+        papers = papers[:max_results]
+        complete = False
+
+    # The API counts version rows; ``papers`` has been collapsed to one entry
+    # per DOI. Comparing the two directly makes any window holding a v2
+    # preprint report truncation on a complete sweep — and a truncation
+    # warning that fires on healthy runs is one the agent learns to ignore.
+    # So say "nothing was left behind" the only way SearchResult can: a count
+    # equal to what we are returning.
+    if complete:
+        available: int | None = len(papers)
+    elif totals_known:
+        available = total_rows  # rows, so an over-estimate of distinct works
+    else:
+        available = None  # unknown — must not be reported as a complete sweep
+    return SearchResult(papers, available)
