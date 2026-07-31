@@ -76,6 +76,73 @@ confidence; silence about it is what lowers confidence.
 
 ---
 
+## Biology-specific: the three that have no equivalent elsewhere
+
+These are where a reviewer from another field would nod along and a biologist
+would stop reading. Check them on any paper making a claim about a living
+system.
+
+### Correlation presented as mechanism
+
+A plausible story plus a correlation is not a mechanism, and the language often
+does not distinguish them — "X regulates Y" is written the same way whether it
+was observed or established. Look for the intervention:
+
+- **Loss of function alone is weak.** Knockdown or knockout showing an effect
+  is consistent with the proposal and with a dozen other things, including
+  compensation and off-target effects.
+- **Rescue is what makes it causal.** Does re-introducing the gene restore the
+  phenotype? A knockdown without a rescue is one experiment short.
+- **Dose dependence.** Does more of the perturbation give more of the effect?
+- **The point mutation test.** A mutation abolishing exactly the proposed
+  interaction, with the rest of the protein intact, is the strongest form —
+  and its absence in a paper that clearly could have done it is informative.
+- **Direction.** Does the paper establish X → Y rather than Y → X or Z → both?
+  Time-course and epistasis experiments are how; assertion is not.
+
+Record which of these the paper has and which it asserts. That distinction is
+usually the difference between the abstract and the data.
+
+### The model system and the distance to the claim
+
+Every result is a result *in something*, and the claim is usually about
+something else. Name the gap:
+
+- Immortalised cell line, primary cells, organoid, animal, human?
+- HEK293 or HeLa are convenient, not typical — they are aneuploid and
+  transcriptionally unlike most tissue.
+- Overexpression is a perturbation. A protein at 50× physiological level
+  localises and interacts differently; "we observed X at the membrane" under
+  overexpression is a statement about the experiment.
+- *In vitro* reconstitution buys control and gives up the cellular context —
+  crowding, competing partners, post-translational modifications.
+- One species is one species. Mouse is not human, and the exceptions matter
+  more than the rule.
+
+None of these invalidate a paper. All of them bound what it shows, and a paper
+that does not bound itself has left the job to you.
+
+### The proxy and the target
+
+Biology measures what it can, and concludes about what it cares about. The two
+are usually not the same thing, and the gap is where claims quietly widen:
+
+| Measured | Concluded | The gap |
+|---|---|---|
+| mRNA level | protein level | translation and degradation are regulated separately |
+| Expression | function | an inactive protein still shows up on a blot |
+| Colocalisation | interaction | diffraction-limited microscopy resolves ~200 nm, which is enormous at protein scale |
+| Co-IP | direct binding | pulls down complexes, not pairs |
+| Binding at one concentration | affinity | affinity is a curve |
+| Predicted structure | structure | including high-confidence predictions |
+| Growth rate | fitness | in one condition |
+
+Ask what the assay physically reports, then ask whether the conclusion needs
+more than that. Also check the antibody: validated how, and in a knockout?
+Unvalidated antibodies are a well-documented source of irreproducible results.
+
+---
+
 ## Computational biology and structural prediction
 
 ### Homology leakage — check this first

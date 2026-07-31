@@ -45,7 +45,26 @@ CONFIDENCES = ("high", "medium", "low")
 RELEVANCE_STATES = ("written", "no-background-provided")
 FULLTEXT_STATES = ("full", "abstract-only")
 
-UNDERSTANDING_FIELDS = ("problem", "method", "experiments", "findings")
+#: What kind of paper this is. It decides how ``pipeline`` decomposes — a
+#: model has training and inference, a cryo-EM structure has sample prep and
+#: reconstruction, and asking for the wrong one produces a section that
+#: describes a paper nobody wrote. See SKILL.md step 4.
+PAPER_TYPES = ("computational", "experimental", "method", "resource", "theory")
+
+#: The teaching half, in the order it should be written. Each answers a
+#: question the previous one raises: what is hard → what is the idea → what
+#: does it do concretely → why does that work → what came out.
+UNDERSTANDING_FIELDS = ("problem", "approach", "pipeline", "mechanism", "findings")
+
+#: Fields where a one-liner means the paper was summarised rather than read.
+#: ``findings`` is exempt: a headline number is legitimately short.
+DEPTH_FIELDS = ("problem", "approach", "pipeline", "mechanism")
+
+#: Weighted-character floor below which a field warns. CJK carries roughly
+#: twice the information per character, so it counts double and the same
+#: threshold works for both languages. Deliberately low — this catches
+#: "the method improves accuracy" and nothing subtler.
+MIN_DEPTH = 180
 
 
 class NoteError(RuntimeError):
@@ -61,12 +80,14 @@ TEMPLATE: dict[str, Any] = {
         "venue": "",
         "doi": "",
         "url": "",
+        "type": "experimental",
         "fulltext": "full",
     },
     "understanding": {
         "problem": "",
-        "method": "",
-        "experiments": "",
+        "approach": "",
+        "pipeline": "",
+        "mechanism": "",
         "findings": "",
     },
     "assessment": {
@@ -89,6 +110,16 @@ def _blank(value: Any) -> bool:
     return value is None or (isinstance(value, (str, list, dict)) and not value)
 
 
+def _depth(text: str) -> int:
+    """Weighted length: CJK characters count double.
+
+    A Chinese sentence carries about twice the information of an English one
+    of the same character count, so a single threshold over raw ``len`` would
+    demand three paragraphs of English and one line of Chinese.
+    """
+    return len(text) + sum(1 for ch in text if "一" <= ch <= "鿿")
+
+
 def validate(note: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Return ``(errors, warnings)``.
 
@@ -101,6 +132,11 @@ def validate(note: dict[str, Any]) -> tuple[list[str], list[str]]:
     paper = note.get("paper") or {}
     if _blank(paper.get("title")):
         errors.append("paper.title is empty")
+    if paper.get("type") not in PAPER_TYPES:
+        errors.append(
+            f"paper.type must be one of {PAPER_TYPES}, got {paper.get('type')!r} — "
+            "it decides how the pipeline section decomposes"
+        )
     fulltext = paper.get("fulltext")
     if fulltext not in FULLTEXT_STATES:
         errors.append(f"paper.fulltext must be one of {FULLTEXT_STATES}, got {fulltext!r}")
@@ -115,6 +151,15 @@ def validate(note: dict[str, Any]) -> tuple[list[str], list[str]]:
         if _blank(understanding.get(field)):
             errors.append(f"understanding.{field} is empty")
 
+    for field in DEPTH_FIELDS:
+        text = str(understanding.get(field) or "")
+        if text and _depth(text) < MIN_DEPTH:
+            warnings.append(
+                f"understanding.{field} is {_depth(text)} weighted characters, under "
+                f"{MIN_DEPTH}. A deep read explains; a summary states. Say why it is "
+                "hard, not just what it is"
+            )
+
     findings = understanding.get("findings") or ""
     if findings and not ANCHOR.search(findings):
         warnings.append(
@@ -124,7 +169,50 @@ def validate(note: dict[str, Any]) -> tuple[list[str], list[str]]:
 
     errors.extend(_validate_assessment(note.get("assessment") or {}, fulltext))
     errors.extend(_validate_relevance(note.get("relevance") or {}))
+    errors.extend(_validate_no_markup(note))
     return errors, warnings
+
+
+#: Markdown that shows up as literal characters in Word. Emphasis is the
+#: renderer's job; the note carries text.
+_MARKUP = (
+    (re.compile(r"\*\*|__"), "bold markers (** or __)"),
+    (re.compile(r"`"), "backticks"),
+    (re.compile(r"^\s*#{1,6}\s", re.MULTILINE), "a Markdown heading"),
+    (re.compile(r"^\s*>\s", re.MULTILINE), "a blockquote marker"),
+    (re.compile(r"^\s*[-*+]\s", re.MULTILINE), "a bullet marker"),
+)
+
+
+def _walk_text(value: Any, path: str = "") -> list[tuple[str, str]]:
+    if isinstance(value, str):
+        return [(path, value)]
+    if isinstance(value, dict):
+        return [t for k, v in value.items() for t in _walk_text(v, f"{path}.{k}" if path else k)]
+    if isinstance(value, list):
+        return [t for i, v in enumerate(value) for t in _walk_text(v, f"{path}[{i}]")]
+    return []
+
+
+def _validate_no_markup(note: dict[str, Any]) -> list[str]:
+    """Reject Markdown syntax anywhere in the note's text.
+
+    Markdown renders it; Word shows it verbatim. Since both come from the same
+    note, anything that only works in one of them is a defect. Paragraph breaks
+    are the supported structure — a blank line, which ``paragraphs()`` turns
+    into separate blocks.
+    """
+    errors = []
+    for path, text in _walk_text(note):
+        for pattern, what in _MARKUP:
+            if pattern.search(text):
+                errors.append(
+                    f"{path} contains {what}. The note carries text, not Markdown — Word "
+                    "renders it literally. Use a blank line for a new paragraph, and put "
+                    "list items in the fields that are already lists"
+                )
+                break
+    return errors
 
 
 def _validate_assessment(assessment: dict[str, Any], fulltext: Any) -> list[str]:
@@ -202,10 +290,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "title": "Deep read: {title}",
         "paper": "The paper",
         "part1": "Part 1 — What it does",
-        "problem": "The problem",
-        "method": "The method",
-        "experiments": "The experiments",
-        "findings": "What they found",
+        "problem": "The problem, and why it is hard",
+        "approach": "The idea, and how it answers that problem",
+        "pipeline": "What it actually does, step by step",
+        "mechanism": "The mechanism that carries the result",
+        "findings": "What came out",
         "part2": "Part 2 — Assessment",
         "claims": "Claim by claim",
         "col_claim": "Claim",
@@ -227,6 +316,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "paper's actual figures, tables or methods. This is a summary, not a deep read.",
         "authors": "Authors",
         "venue": "Venue",
+        "kind": "Kind",
+        "type_computational": "computational / model",
+        "type_experimental": "experimental",
+        "type_method": "method or tool",
+        "type_resource": "resource or dataset",
+        "type_theory": "theory or review",
         "decision_follow-up": "Worth following up",
         "decision_watch": "Worth watching",
         "decision_skip": "Can skip",
@@ -238,9 +333,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "title": "精读：{title}",
         "paper": "论文信息",
         "part1": "第一部分 — 这篇做了什么",
-        "problem": "问题",
-        "method": "方法",
-        "experiments": "实验",
+        "problem": "问题：要解决什么，为什么难",
+        "approach": "思路：凭什么这么做能解决",
+        "pipeline": "具体怎么做的：逐步拆解",
+        "mechanism": "真正起作用的机制",
         "findings": "结果",
         "part2": "第二部分 — 评价",
         "claims": "逐条审查主张",
@@ -262,6 +358,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "这是摘要，不是精读。",
         "authors": "作者",
         "venue": "发表于",
+        "kind": "论文类型",
+        "type_computational": "计算 / 模型",
+        "type_experimental": "实验",
+        "type_method": "方法或工具",
+        "type_resource": "资源或数据集",
+        "type_theory": "理论或综述",
         "decision_follow-up": "值得跟进",
         "decision_watch": "值得观望",
         "decision_skip": "可以跳过",
@@ -275,6 +377,17 @@ STRINGS: dict[str, dict[str, str]] = {
 def _text(value: Any, fallback: str = "") -> str:
     text = str(value).strip() if value is not None else ""
     return text or fallback
+
+
+def paragraphs(value: Any) -> list[str]:
+    """Split a field into paragraphs on blank lines.
+
+    Long fields are written as several paragraphs. Each has to reach a
+    renderer as its own block: a Word paragraph cannot contain a newline, so
+    handing over the raw string collapses the structure into one wall of text.
+    """
+    text = _text(value)
+    return [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
 
 
 def build_blocks(note: dict[str, Any]) -> list[dict[str, Any]]:
@@ -306,6 +419,9 @@ def build_blocks(note: dict[str, Any]) -> list[dict[str, Any]]:
     if authors:
         shown = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
         fields.append({"label": s["authors"], "value": shown})
+    kind = paper.get("type")
+    if kind:
+        fields.append({"label": s["kind"], "value": s.get(f"type_{kind}", str(kind))})
     for label, key in ((s["venue"], "venue"), ("DOI", "doi"), ("URL", "url")):
         if paper.get(key):
             fields.append({"label": label, "value": str(paper[key])})
@@ -316,7 +432,11 @@ def build_blocks(note: dict[str, Any]) -> list[dict[str, Any]]:
     blocks.append({"type": "h1", "text": s["part1"]})
     for field in UNDERSTANDING_FIELDS:
         blocks.append({"type": "h2", "text": s[field]})
-        blocks.append({"type": "p", "text": _text(understanding.get(field))})
+        # A long field is written as several paragraphs separated by a blank
+        # line. They have to become separate blocks: Word has no newline
+        # inside a paragraph, so a renderer handed the raw string produces one
+        # run-on wall of text.
+        blocks += [{"type": "p", "text": para} for para in paragraphs(understanding.get(field))]
 
     blocks += _assessment_blocks(note.get("assessment") or {}, s)
     blocks += _relevance_blocks(note.get("relevance") or {}, s)

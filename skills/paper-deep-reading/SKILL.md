@@ -81,6 +81,12 @@ itself, and you do not fully recover from that.
    audited. "Improves binding affinity prediction" and "improves binding
    affinity prediction by 12% over AlphaFold3" are not the same claim and do
    not need the same evidence.
+
+   **Decide `paper.type` here too** — `computational`, `experimental`,
+   `method`, `resource` or `theory`. It changes what you look for in the rest
+   of the pass and how step 4's pipeline section decomposes. When a paper both
+   builds a model and validates it at the bench, ask which one the paper would
+   still be worth publishing without.
 2. **The figures and tables, before the prose around them.** Look at the
    numbers first. What is the spread? Is there an error bar? How many
    conditions? Which comparison is conspicuously absent?
@@ -98,24 +104,109 @@ itself, and you do not fully recover from that.
 7. **Related work, last.** Once you know what the paper did, you can judge
    whether it is compared against the right things. Before that, you cannot.
 
-### 4. Write the first half — what the paper does
+### 4. Write the first half — teach the paper
 
-Four fields, in the user's language, technical terms and figure references left
-in the paper's:
+**Write as a professor explaining to a capable colleague from a neighbouring
+field, not as an abstract-shortening service.** The test is whether a reader
+who has never seen this paper could, after your section, say why the work was
+hard and why this particular idea was a reasonable bet. A section that only
+restates what the paper did has failed even if every sentence is true.
 
-- **problem** — what they are trying to solve and why it is hard. Where were
-  the previous attempts stuck? A problem statement that does not say what was
-  blocking people is a topic, not a problem.
-- **method** — how it works, and specifically which design choice is doing the
-  work. Most papers have one. Name it.
-- **experiments** — the setup: datasets, baselines, metrics, how much data,
-  how many runs. This is the section you will lean on in step 5, so be
-  concrete.
-- **findings** — what came out, with pointers (`Fig. 3b`, `Table 2`). Report
-  the results here; save what you think of them for the next section.
+Five fields, in the user's language, with technical terms and figure references
+left in the paper's. They are ordered so each answers a question the previous
+one raises — write them in order and the logic flows on its own.
 
-Write this half so someone outside the subfield can follow it. Explain the
-terms that need explaining. This is the "先讲清楚" half.
+#### `problem` — what, and **why it is hard**
+
+Not the topic. The obstacle. Three things have to be in here:
+
+1. What are they trying to achieve, concretely enough to know when it is done.
+2. **Why is that hard?** What is the specific difficulty — combinatorial size,
+   no ground truth, the signal is below the noise, the assay destroys the
+   sample, the interesting cases are the rare ones?
+3. **Where did previous attempts get stuck, and why?** Not "existing methods
+   have limitations" — *which* limitation, arising from *what* about how they
+   worked.
+
+If you cannot say why the problem is hard, you have not found the problem yet.
+Go back to the introduction and the related work.
+
+#### `approach` — the idea, and **why it should work**
+
+Take the obstacles you just named and answer them **one by one**. The reader
+should be able to draw a line from each difficulty in `problem` to something
+in `approach`. If a difficulty has no answer here, say so explicitly — a paper
+that solves two of three obstacles and is quiet about the third is telling you
+where its weakness is.
+
+State the central idea in one or two sentences before any detail. If you
+cannot, you have not understood it yet — and an analogy is worth using here,
+provided you say where the analogy breaks.
+
+#### `pipeline` — what it actually does, step by step
+
+Concrete and sequential, so the reader could sketch the flow. **How this
+decomposes depends on `paper.type`:**
+
+| `paper.type` | Decompose as |
+|---|---|
+| `computational` | **Training**: what data, what the model sees, what it predicts, what the loss rewards. Then **inference**: what you must supply at run time, what comes back, what post-processing runs. Keep them separate — conflating them hides whether a resource is needed once or every time. |
+| `experimental` | **System → perturbation → readout → analysis.** Which organism, cell line, or reconstituted system. What was changed and how. What was measured, on what instrument, at what resolution. What the raw data had to go through to become the figure. |
+| `method` | The protocol as someone would run it: inputs, steps, what each step is for, what it outputs, where it can fail. |
+| `resource` | How the data was collected, what was included and excluded, how it is annotated, how someone queries it. |
+| `theory` | The assumptions, the derivation's spine, and what would have to be true in reality for it to apply. |
+
+Three things belong here regardless of type, because they are the ones most
+often omitted and they bound everything downstream:
+
+- **The model system, and its distance from the claim.** A result in HEK293
+  cells is not a result in neurons; a result in *E. coli* is not a result in
+  humans; an *in vitro* reconstitution is not a cell. State what was used.
+- **What was physically measured, versus what is being concluded from it.**
+  Expression is not function. Binding in one assay at one concentration is not
+  affinity. Colocalisation is not interaction. Predicted structure is not
+  structure.
+- **Sample size and replication.** Biological replicates or technical ones?
+  How many? A study with n = 3 wells from one culture has n = 1.
+
+#### `mechanism` — why it works, in depth
+
+The single hardest and most valuable field. `approach` says what the idea is;
+this says **why that idea has the effect it has**. Name the one thing that
+carries the result — most papers have exactly one — and then go under it:
+
+- What would happen if it were removed? Does the paper show that (an ablation,
+  a knockout, a mutant, a control)?
+- Is it doing what the authors say it is doing, or is something correlated with
+  it doing the work? This is the question their ablations either answer or dodge.
+- Under what conditions would it stop working? The boundary tells you more
+  about a mechanism than the successes do.
+
+For a biological claim, this is where the causal question lives. Correlation
+plus a plausible story is not mechanism. Look for the intervention: knockdown
+*and* rescue, dose dependence, a point mutation that abolishes exactly the
+proposed interaction. Say which of these the paper has and which it asserts.
+
+#### `findings` — what came out
+
+Results with pointers (`Fig. 3b`, `Table 2`). Report here; judge in step 5.
+Include the numbers that matter and the units and conditions they were measured
+under — "12% better" without saying better at what, measured how, against what
+is not a result.
+
+#### Register
+
+- Explain each technical term the first time it appears, in one clause.
+- Prefer the concrete: "the pocket is too shallow to hold the ligand at
+  physiological pH" beats "binding is suboptimal".
+- Analogies are welcome and **must** be accompanied by where they fail.
+- Ban the empty intensifiers: *novel*, *significant improvement*, *demonstrates
+  the effectiveness of*. If a sentence survives deleting them unchanged, it was
+  not carrying information.
+
+`scripts/note.py validate` warns when one of these fields is too short to be
+doing this job. It is a floor, not a target — clearing it is not the same as
+having explained anything.
 
 ### 5. Audit the claims — this is what a deep read is for
 
@@ -141,11 +232,22 @@ Three rules:
   can have a low-confidence claim; a paper you find unconvincing can have
   high-confidence ones. Grade each row on its own.
 
-Read `references/credibility-checks.md` before writing this section. It is the
-checklist of what to look for — baseline vintage, missing ablations, variance
-reporting — including the failure modes specific to computational biology, of
-which **train/test homology leakage** is by far the most common and the least
-often disclosed.
+Read `references/credibility-checks.md` before writing this section. Alongside
+the general checks — baseline vintage, missing ablations, variance reporting —
+it carries the three that have no equivalent outside biology and that a
+reviewer from another field would read straight past:
+
+- **Correlation presented as mechanism.** Knockdown alone is one experiment
+  short of causal; rescue, dose dependence and the abolishing point mutation
+  are what close it.
+- **The model system and the distance to the claim.** HEK293 is not a neuron,
+  overexpression is itself a perturbation, and *in vitro* is not a cell.
+- **The proxy and the target.** mRNA is not protein, expression is not
+  function, colocalisation is not interaction, and a predicted structure is
+  not a structure.
+
+For computational work, **train/test homology leakage** is the most common and
+least often disclosed failure of all — check it first.
 
 Then fill `limitations`: what the authors acknowledged, and separately what
 they did not. Keeping those apart is deliberate. "The authors note that…" and

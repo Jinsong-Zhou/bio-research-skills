@@ -29,21 +29,31 @@ way the reader cannot detect.
 | `venue` | | Journal, conference, or the preprint server |
 | `doi` | | |
 | `url` | | |
+| `type` | ✅ | `computational` \| `experimental` \| `method` \| `resource` \| `theory`. **This decides how `pipeline` decomposes** — a model has training and inference, a cryo-EM structure has sample prep and reconstruction. Choosing wrong produces a section describing a paper nobody wrote. A paper that both builds a model and validates it in the lab is `computational` if the model is the contribution, `experimental` if the validation is. |
 | `fulltext` | ✅ | `"full"` or `"abstract-only"`. Copy from `fetch.py`'s report — do not set `"full"` because it feels better. `"abstract-only"` puts a banner at the top of the document, which is the honest thing for a note written without the paper. |
 
 ## `understanding`
 
-All four required, all free text in the note's language.
+All five required, all free text in the note's language. They are ordered so
+each answers a question the previous one raises; SKILL.md step 4 has the full
+instructions and the per-`paper.type` decomposition for `pipeline`.
 
 | field | what belongs in it |
 |---|---|
-| `problem` | What they are solving and why it was hard. Name what previous attempts were stuck on. |
-| `method` | How it works, and which design choice is load-bearing. |
-| `experiments` | Datasets, baselines, metrics, scale, number of runs. Be concrete — step 5 leans on this. |
+| `problem` | What they are solving, **why it is hard**, and where previous attempts got stuck *and why*. A problem statement that names no obstacle is a topic. |
+| `approach` | The central idea, and how it answers the obstacles in `problem` **one by one**. An obstacle with no answer here should be named as unanswered. |
+| `pipeline` | What it concretely does, in sequence. Decomposes differently per `paper.type`. Must state the model system, what was physically measured versus what is concluded, and the replication. |
+| `mechanism` | Why the idea has the effect it has. Name the one thing carrying the result, whether the paper isolates it, and where it would stop working. For a biological claim this is where correlation-versus-causation lives. |
 | `findings` | What came out, with pointers (`Fig. 3b`, `Table 2`). Results only; judgement goes in `assessment`. |
 
-`findings` without any figure/table/section reference triggers a warning, not
-an error — some papers genuinely report a single headline number in prose.
+Two soft checks, both warnings rather than errors:
+
+- **Depth.** `problem`, `approach`, `pipeline` and `mechanism` warn below
+  `MIN_DEPTH` weighted characters (CJK counts double, so one threshold serves
+  both languages). It catches "the method improves accuracy" and nothing
+  subtler — clearing it is a floor, not evidence of having explained anything.
+- **Pointers.** `findings` with no figure/table/section reference warns; some
+  papers genuinely report one headline number in prose.
 
 ## `assessment`
 
@@ -142,6 +152,7 @@ limitations section is visibly empty rather than absent.
     "year": 2026,
     "venue": "bioRxiv",
     "doi": "10.1101/2026.01.15.575681",
+    "type": "computational",
     "fulltext": "full"
   },
   "assessment": {

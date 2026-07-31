@@ -12,13 +12,49 @@ import pytest
 
 
 def valid_note() -> dict:
+    """A note that clears every check, including the depth floor.
+
+    Written out at realistic length on purpose: a fixture of one-liners would
+    let a regression in the depth warning pass unnoticed.
+    """
     return {
         "language": "en",
-        "paper": {"title": "A paper", "authors": ["A. One", "B. Two"], "fulltext": "full"},
+        "paper": {
+            "title": "A paper",
+            "authors": ["A. One", "B. Two"],
+            "type": "computational",
+            "fulltext": "full",
+        },
         "understanding": {
-            "problem": "Existing methods stall on long sequences.",
-            "method": "A two-stage encoder.",
-            "experiments": "PDBbind core set, three seeds, compared against AF3.",
+            "problem": (
+                "Predicting binding affinity from a complex structure is hard because the "
+                "training signal is scarce and biased: measured affinities exist for a few "
+                "thousand complexes, overwhelmingly kinases and proteases. Earlier docking "
+                "scores generalised badly because they were fitted on that same skewed slice, "
+                "so a model could score well on held-out data and still fail on any target "
+                "family the database under-represents."
+            ),
+            "approach": (
+                "Two ideas, one per obstacle. Scarcity is answered by pre-training on "
+                "unlabelled structures, so affinity prediction starts from a representation "
+                "that already knows what contacts look like. Family bias is answered by "
+                "reweighting the fine-tuning set per Pfam family. Nothing in the paper "
+                "addresses the third obstacle, assay heterogeneity across source databases."
+            ),
+            "pipeline": (
+                "Training: pre-train a contact-prediction head on PDB complexes deposited "
+                "before 2021, then fine-tune on PDBbind with per-family reweighting, three "
+                "seeds. Inference: supply a holo complex structure and get a scalar pKd; no "
+                "MSA is needed at run time, which is the practical difference from the "
+                "baseline. Evaluated on the PDBbind core set, n = 285 complexes."
+            ),
+            "mechanism": (
+                "The reweighting is what carries the result. Removing it (Table 3) drops "
+                "performance on under-represented families back to baseline while leaving "
+                "kinase performance untouched, which is the signature of a bias correction "
+                "rather than a general improvement. It should stop working wherever family "
+                "labels are unreliable, and the paper does not test that regime."
+            ),
             "findings": "12% higher Pearson r than the baseline (Table 2).",
         },
         "assessment": {
@@ -109,6 +145,39 @@ class TestValidationRefuses:
     def test_an_invented_fulltext_state(self):
         errors = errors_for(lambda d: d["paper"].update(fulltext="partial"))
         assert any("paper.fulltext" in e for e in errors)
+
+    @pytest.mark.parametrize("kind", ["paper", "", None, "wet-lab"])
+    def test_a_paper_type_outside_the_five(self, kind):
+        """The type decides how the pipeline section decomposes, so a wrong one
+        produces a section describing a paper nobody wrote."""
+        errors = errors_for(lambda d: d["paper"].update(type=kind))
+        assert any("paper.type" in e for e in errors)
+
+
+class TestDepthFloor:
+    """A one-line field means the paper was summarised, not read."""
+
+    @pytest.mark.parametrize("field", note.DEPTH_FIELDS)
+    def test_a_one_liner_warns(self, field):
+        data = valid_note()
+        data["understanding"][field] = "The method improves accuracy."
+        errors, warnings = note.validate(data)
+        assert errors == []
+        assert any(f"understanding.{field}" in w and "weighted characters" in w for w in warnings)
+
+    def test_findings_may_legitimately_be_short(self):
+        """A headline number is a result; it does not need three paragraphs."""
+        data = valid_note()
+        data["understanding"]["findings"] = "12% higher Pearson r (Table 2)."
+        assert note.validate(data)[1] == []
+
+    def test_chinese_clears_the_floor_at_half_the_characters(self):
+        """CJK counts double, so one threshold serves both languages rather
+        than demanding three English paragraphs or one Chinese line."""
+        english = "a" * 179
+        chinese = "问" * 90
+        assert note._depth(english) < note.MIN_DEPTH
+        assert note._depth(chinese) >= note.MIN_DEPTH
 
 
 class TestNullEvidenceIsAFinding:
@@ -220,6 +289,67 @@ class TestRendering:
         data["assessment"]["limitations"] = {"acknowledged": [], "unstated": []}
         rendered = note.render_markdown(data)
         assert rendered.count("- —") == 2
+
+
+class TestNoMarkupInTheNote:
+    """Markdown renders it; Word shows it verbatim. Since both come from one
+    note, anything working in only one of them is a defect."""
+
+    @pytest.mark.parametrize(
+        ("text", "what"),
+        [
+            ("the **key** step", "bold"),
+            ("the __key__ step", "underscore bold"),
+            ("call `note.py` first", "backticks"),
+            ("# A heading\nthen text", "heading"),
+            ("> a quotation\nthen text", "blockquote"),
+            ("- first item\n- second item", "bullets"),
+        ],
+    )
+    def test_markup_anywhere_is_rejected(self, text, what):
+        errors = errors_for(lambda d: d["understanding"].update(problem=text))
+        assert any("understanding.problem" in e for e in errors), what
+
+    def test_it_reaches_nested_text(self):
+        errors = errors_for(lambda d: d["assessment"]["claims"][0].update(issue="**no rescue**"))
+        assert any("assessment.claims[0].issue" in e for e in errors)
+
+    def test_it_reaches_list_items(self):
+        errors = errors_for(
+            lambda d: d["assessment"]["limitations"].update(unstated=["ok", "**not ok**"])
+        )
+        assert any("limitations.unstated[1]" in e for e in errors)
+
+    def test_ordinary_prose_with_asterisk_free_punctuation_passes(self):
+        """Em dashes, brackets, ratios and DOIs must not trip the check."""
+        errors = errors_for(
+            lambda d: d["understanding"].update(
+                problem="A 2-fold change (Fig. 1) — see 10.1101/x — is within noise; n = 3/group. "
+                * 3
+            )
+        )
+        assert errors == []
+
+
+class TestParagraphSplitting:
+    def test_a_blank_line_starts_a_new_block(self):
+        """Word has no newline inside a paragraph, so a renderer handed the
+        raw string produces one run-on wall of text."""
+        data = valid_note()
+        data["understanding"]["problem"] = "First para.\n\nSecond para.\n\nThird para."
+        texts = [b["text"] for b in note.build_blocks(data) if b["type"] == "p"]
+        assert "First para." in texts
+        assert "Second para." in texts
+        assert "Third para." in texts
+
+    def test_single_newlines_stay_within_one_paragraph(self):
+        assert note.paragraphs("a\nb") == ["a\nb"]
+
+    def test_blank_lines_of_whitespace_still_split(self):
+        assert note.paragraphs("a\n   \nb") == ["a", "b"]
+
+    def test_empty_text_yields_no_blocks(self):
+        assert note.paragraphs("") == []
 
 
 class TestBlocks:
