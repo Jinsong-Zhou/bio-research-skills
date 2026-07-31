@@ -42,6 +42,12 @@ from _findings import Finding, FindingError, read_json, write_json
 
 SCHEMA = "code-reproduction/gate/1"
 
+# What each input file must announce itself as. Checked rather than assumed:
+# the two flags take structurally similar JSON, and getting them the wrong way
+# round used to produce the most reassuring output this program can print.
+SURVEY_SCHEMA = "code-reproduction/survey/"
+PROBE_SCHEMA = "code-reproduction/probe/"
+
 # Worst first. `_worst` relies on this order.
 VERDICTS = ("blocked", "unknown", "degraded", "ok")
 
@@ -61,11 +67,35 @@ def _mapping(payload: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _require_schema(payload: dict[str, Any], expected: str, flag: str) -> None:
+    """Refuse a file that is not the kind this flag asked for.
+
+    `--survey probe.json --probe survey.json` used to print `Verdict: OK` and
+    exit 0: a probe file has no `findings` key, no findings meant nothing to
+    gate, and nothing to gate meant pass. Both halves of that are fixed — this
+    check, and `_worst` no longer treating an empty comparison as a clean one.
+    """
+    found = payload.get("schema")
+    if isinstance(found, str) and found.startswith(expected):
+        return
+    other = PROBE_SCHEMA if expected == SURVEY_SCHEMA else SURVEY_SCHEMA
+    swapped = isinstance(found, str) and found.startswith(other)
+    raise FindingError(
+        f"{flag} was handed a file declaring schema {found!r}, expected {expected}*"
+        + (" — the --survey and --probe arguments look swapped" if swapped else "")
+    )
+
+
 def _worst(verdicts: list[str]) -> str:
+    """The worst verdict present. An empty comparison is not a pass.
+
+    Nothing to compare means no requirement was evaluated at all, which is a
+    survey that did not run rather than a host that qualified.
+    """
     for verdict in VERDICTS:
         if verdict in verdicts:
             return verdict
-    return "ok"
+    return "unknown"
 
 
 def _version(text: str | None) -> tuple[int, ...] | None:
@@ -253,12 +283,21 @@ def evaluate(key: str, needed: Any, probe: dict[str, Any]) -> dict[str, Any]:
 
 
 def _gate(key: str, needed: Any, found: Any, verdict: str, why: str) -> dict[str, Any]:
+    if verdict not in VERDICTS:
+        raise FindingError(
+            f"{key}: {verdict!r} is not a verdict. `_worst` scans for the ones it knows and "
+            f"ignores the rest, so a typo in one of these literals would read as a pass. "
+            f"Expected one of {VERDICTS}."
+        )
     return {"requirement": key, "needed": needed, "found": found, "verdict": verdict, "why": why}
 
 
 def assess(
     survey: dict[str, Any], probe: dict[str, Any], target: str = "inference"
 ) -> dict[str, Any]:
+    _require_schema(survey, SURVEY_SCHEMA, "--survey")
+    _require_schema(probe, PROBE_SCHEMA, "--probe")
+
     findings = [Finding.from_dict(raw) for raw in survey.get("findings", [])]
     applicable = [f for f in findings if f.gates(target)]
     deferred = [f for f in findings if not f.gates(target)]
@@ -291,6 +330,12 @@ def assess(
     ]
 
     verdicts = [row["verdict"] for row in rows] + (["unknown"] if unresolved else [])
+    if not verdicts:
+        # Nothing gates this target — which is a real answer when the survey
+        # saw things and deferred them all to the other one, and a broken
+        # survey when it saw nothing at all. Those are different reports and
+        # the difference is stated here rather than left to a default.
+        verdicts = ["ok" if findings else "unknown"]
     overall = _worst(verdicts)
 
     return {

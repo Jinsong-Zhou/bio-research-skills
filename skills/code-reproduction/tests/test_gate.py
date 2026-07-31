@@ -53,6 +53,77 @@ def a_survey(findings, inconclusive=None):
     }
 
 
+class TestFailClosed:
+    """Each of these produced a clean report, and all of them are one mistake.
+
+    Something the program could not evaluate came out the far end as something
+    it had evaluated and found fine. That is the failure this skill exists to
+    name, which makes it the one worth testing hardest.
+    """
+
+    def test_the_survey_and_probe_arguments_swapped_are_refused(self):
+        """`--survey probe.json --probe survey.json` used to print OK and exit 0."""
+        with pytest.raises(FindingError) as caught:
+            assess(host(), a_survey([a_finding()]))
+        assert "swapped" in str(caught.value)
+
+    def test_a_file_that_declares_no_schema_is_refused(self):
+        survey = a_survey([a_finding()])
+        del survey["schema"]
+        with pytest.raises(FindingError):
+            assess(survey, host())
+
+    def test_a_survey_that_found_nothing_at_all_is_unknown(self):
+        """No findings is a survey that did not run, not a repository with no demands.
+        Every real checkout trips at least the handoff checks."""
+        assert assess(a_survey([]), host())["verdict"] == "unknown"
+
+    def test_a_typo_in_a_verdict_literal_is_refused(self):
+        """`_worst` scans for the verdicts it knows and ignores the rest, so one
+        mistyped literal among the twenty in `evaluate` would read as a pass."""
+        with pytest.raises(FindingError) as caught:
+            gate_module._gate("vram_gb", 40.0, 24.0, "blockd", "a typo")
+        assert "blockd" in str(caught.value)
+
+    def test_nothing_to_compare_is_not_a_pass(self):
+        assert gate_module._worst([]) == "unknown"
+
+
+class TestUnknownOutranksDegraded:
+    """The ordering the rest of this file rests on, finally pinned.
+
+    Swapping the two middle entries of `VERDICTS` left all 137 other tests
+    passing. A report that says "you can start, with known problems" when a
+    stated 40 GB requirement was measured against a card nobody could read is
+    the precise thing `unknown` exists to prevent.
+    """
+
+    def test_worst_prefers_unknown_to_degraded(self):
+        assert gate_module._worst(["degraded", "unknown"]) == "unknown"
+
+    def test_an_unreadable_gate_outranks_a_known_problem(self):
+        report = assess(
+            a_survey(
+                [
+                    a_finding(id="env.torch-outside-manifest", severity="degraded"),
+                    a_finding(id="hardware.vram", requires={"vram_gb": 40.0}),
+                ]
+            ),
+            host(gpu={"available": True, "vram_gb": None, "cuda": "12.6"}),
+        )
+        assert report["verdict"] == "unknown"
+
+    def test_an_open_question_from_the_survey_outranks_a_known_problem(self):
+        report = assess(
+            a_survey(
+                [a_finding(severity="degraded")],
+                inconclusive=[{"check": "files.unread", "why": "build.sh could not be read"}],
+            ),
+            host(),
+        )
+        assert report["verdict"] == "unknown"
+
+
 class TestSingleRequirements:
     def test_a_missing_gpu_blocks_and_repeats_the_probe_reason(self):
         gpu = {"available": False, "why": "nvidia-smi is not on PATH", "vram_gb": None}

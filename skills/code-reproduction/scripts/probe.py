@@ -130,7 +130,12 @@ def probe_gpu() -> dict[str, Any]:
 
 
 def probe_disk(path: str) -> dict[str, Any]:
-    target = Path(path).expanduser()
+    try:
+        target = Path(path).expanduser()
+    except RuntimeError as exc:
+        # `~someone-who-does-not-exist` has no home to expand to. The module
+        # docstring promises this file never raises, so it does not.
+        return {"path": path, "free_gb": None, "why": str(exc)}
     while not target.exists() and target != target.parent:
         target = target.parent
     try:
@@ -163,7 +168,10 @@ def probe_reachability(hosts: list[str]) -> dict[str, Any]:
         try:
             with socket.create_connection((clean, 443), timeout=CONNECT_TIMEOUT):
                 results[clean] = {"reachable": True}
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
+            # UnicodeError, not a subclass of OSError, is what IDNA encoding
+            # raises on a hostname label over 63 characters — a malformed host
+            # in a survey should read as unreachable, not kill the probe.
             results[clean] = {"reachable": False, "why": str(exc)}
     return results
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 import survey as survey_module
@@ -340,6 +341,43 @@ class TestHardware:
         assert "hardware.gpu" in ids_of(payload)
         assert "hardware.vram" in inconclusive_checks(payload)
 
+    def test_system_memory_on_the_same_line_is_not_read_as_vram(self, make_repo):
+        """The figure has to be about the card, not merely near the word "memory"."""
+        root = make_repo(
+            {
+                "LICENSE": MIT,
+                "docs/hardware.md": "Requires 24 GB VRAM, and 8 GB system memory for the loader.\n",
+                "run.py": "import torch\nassert torch.cuda.is_available()\n",
+            }
+        )
+        assert finding(survey_repo(root), "hardware.vram")["requires"] == {"vram_gb": 24.0}
+
+    def test_a_document_that_only_sizes_system_ram_states_no_vram_figure(self, make_repo):
+        """Reading host RAM as VRAM blocks hosts that would have run it — and passes
+        hosts that will not, whenever the RAM figure happens to be the smaller one."""
+        root = make_repo(
+            {
+                "LICENSE": MIT,
+                "docs/hardware.md": "The host needs 64 GB of memory and 500 GB of disk.\n",
+                "run.py": "import torch\ndevice = 'cuda'\n",
+            }
+        )
+        payload = survey_repo(root)
+        assert "hardware.vram" not in ids_of(payload)
+        assert "hardware.vram" in inconclusive_checks(payload)
+
+    def test_a_gpu_figure_that_never_says_memory_is_still_read(self, make_repo):
+        """Guard against narrowing the pattern into uselessness: this is how most
+        READMEs actually word it."""
+        root = make_repo(
+            {
+                "LICENSE": MIT,
+                "README.md": "Inference needs a GPU with at least 40 GB.\n",
+                "run.py": "import torch\ndevice = 'cuda'\n",
+            }
+        )
+        assert finding(survey_repo(root), "hardware.vram")["requires"] == {"vram_gb": 40.0}
+
     def test_cluster_training_is_deferred_to_the_training_target(self, make_repo):
         train = "#SBATCH --nodes=8\nsrun python t.py\n"
         root = make_repo({"LICENSE": MIT, "scripts/train.sh": train})
@@ -378,6 +416,68 @@ class TestHandoff:
     def test_ci_presence_is_noticed(self, make_repo):
         root = make_repo({"LICENSE": MIT, ".github/workflows/ci.yml": "on: push\n"})
         assert "handoff.no-ci" not in ids_of(survey_repo(root))
+
+
+class TestWhatTheSurveyCouldNotRead:
+    """A file that was not read is not a file that said nothing.
+
+    Every case here used to be indistinguishable from an empty file: the
+    findings that file would have produced simply did not appear, and the
+    report read as a clean one. This is the failure the whole skill exists to
+    name, so it is checked from the outside — the finding must be gone *and*
+    the reason must be on the record.
+    """
+
+    def _why(self, payload, check):
+        return next(item["why"] for item in payload["inconclusive"] if item["check"] == check)
+
+    def test_a_file_over_the_size_limit_is_recorded(self, make_repo, monkeypatch):
+        """A 2.7 MB accession list took a blocking finding down with it."""
+        monkeypatch.setattr(survey_module, "MAX_FILE_BYTES", 1_000)
+        ids = "\n".join(f"{n:04d}_A" for n in range(400))
+        root = make_repo({"LICENSE": MIT, "assets/data/pdb_multimer_ids.txt": ids})
+        payload = survey_repo(root)
+        assert "data.accession-lists" not in ids_of(payload)
+        assert "pdb_multimer_ids.txt" in self._why(payload, "files.unread")
+        assert payload["repo"]["files_unread"] == 1
+
+    def test_an_unreadable_file_is_recorded_rather_than_read_as_empty(self, make_repo):
+        root = make_repo({"LICENSE": MIT, "env/build.sh": "pip install atomworks || echo oops\n"})
+        script = root / "env/build.sh"
+        script.chmod(0o000)
+        if os.access(script, os.R_OK):
+            script.chmod(0o644)
+            pytest.skip("this user can read a mode-000 file, so there is nothing to test")
+        try:
+            payload = survey_repo(root)
+        finally:
+            script.chmod(0o644)
+        assert "env.swallowed-install-failure" not in ids_of(payload)
+        assert "build.sh" in self._why(payload, "files.unread")
+
+    def test_a_dangling_licence_symlink_is_not_reported_as_no_licence(self, make_repo):
+        """`license.absent` is the strongest thing this script says. It may only be
+        said about a repository that was looked at, not one that was skipped."""
+        root = make_repo({"README.md": "hello\n"})
+        (root / "LICENSE").symlink_to("terms/that/never/arrived.txt")
+        payload = survey_repo(root)
+        assert "license.absent" not in ids_of(payload)
+        assert "LICENSE" in self._why(payload, "license.absent")
+
+    def test_a_symlinked_licence_is_followed_and_read(self, make_repo):
+        root = make_repo({"legal/terms.txt": APACHE, "README.md": "hello\n"})
+        (root / "LICENSE").symlink_to("legal/terms.txt")
+        payload = survey_repo(root)
+        assert "license.absent" not in ids_of(payload)
+        assert "license.absent" not in inconclusive_checks(payload)
+
+    def test_index_truncation_is_recorded(self, make_repo, monkeypatch):
+        monkeypatch.setattr(survey_module, "MAX_FILES", 5)
+        root = make_repo({"LICENSE": MIT, **{f"src/mod{n}.py": "x = 1\n" for n in range(20)}})
+        payload = survey_repo(root)
+        assert payload["repo"]["files_indexed"] == 5
+        assert payload["repo"]["files_over_index_limit"] == 16
+        assert "files.index-truncated" in inconclusive_checks(payload)
 
 
 class TestEvidenceDiscipline:

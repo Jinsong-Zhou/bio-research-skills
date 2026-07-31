@@ -12,6 +12,7 @@ from probe import (
     probe_env_vars,
     probe_gpu,
     probe_python,
+    probe_reachability,
     render_text,
     wanted_from_survey,
 )
@@ -87,6 +88,27 @@ class TestDisk:
         result = probe_disk(str(tmp_path / "weights" / "not" / "created"))
         assert result["free_gb"] is not None
         assert result["path"] == str(tmp_path)
+
+
+    def test_a_home_directory_that_cannot_be_expanded_degrades(self):
+        """`~nobody-by-that-name` raises RuntimeError out of `expanduser`, which is
+        not an OSError and so was not caught. The module promises never to raise."""
+        result = probe_disk("~definitely-not-a-user-on-this-box/weights")
+        assert result["free_gb"] is None
+        assert result["why"]
+
+
+class TestReachability:
+    def test_a_malformed_hostname_is_unreachable_rather_than_fatal(self, monkeypatch):
+        """A DNS label over 63 characters makes IDNA encoding raise UnicodeError —
+        a ValueError, not an OSError. One bad host in a survey killed the probe."""
+
+        def _idna_failure(*_args, **_kwargs):
+            raise UnicodeError("label empty or too long")
+
+        monkeypatch.setattr(probe_module.socket, "create_connection", _idna_failure)
+        result = probe_reachability(["x" * 64 + ".example.com"])
+        assert result["x" * 64 + ".example.com"]["reachable"] is False
 
 
 class TestSurveyHandover:

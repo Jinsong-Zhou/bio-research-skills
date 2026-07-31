@@ -193,7 +193,17 @@ LOCKFILE_GLOBS = ("uv.lock", "poetry.lock", "Pipfile.lock", "conda-lock.yml", "r
 # hardware
 # --------------------------------------------------------------------------
 
-VRAM_LINE = re.compile(r"\b(VRAM|GPU memory|GPU RAM|video memory|memory)\b", re.IGNORECASE)
+# A figure only counts as video memory when something next to it says so. The
+# bare word `memory` used to be an alternative here, which read "64 GB system
+# memory" as a VRAM floor — a false block on hosts that would have run it, and
+# a false pass whenever `min()` then picked a RAM figure below the real one.
+VRAM_TOKEN = re.compile(
+    r"\bVRAM\b|\bHBM\d*\b"
+    r"|\b(?:GPU|video|device|graphics|card)\s+(?:memory|RAM)\b"
+    r"|\bGPUs?\b(?=[^.\n]{0,40}?\d)",
+    re.IGNORECASE,
+)
+VRAM_WINDOW = re.compile(r"[,;]| and ")
 GPU_SKU = re.compile(
     r"\b(A100|H100|H200|L40S?|V100|A6000|RTX\s?\d{4}|T4|MI\d{3}X?)\b", re.IGNORECASE
 )
@@ -228,21 +238,43 @@ class Repo:
 
     def __init__(self, root: Path) -> None:
         self.root = root
+        # Paths this view cannot speak for, and why. Read by `_record_gaps`.
+        self.skipped: dict[str, str] = {}
+        self.truncated = 0
         self.paths = self._index()
         self._cache: dict[str, str | None] = {}
 
     def _index(self) -> list[str]:
         found: list[str] = []
         for path in sorted(self.root.rglob("*")):
-            if len(found) >= MAX_FILES:
-                break
-            if not path.is_file() or path.is_symlink():
-                continue
             rel = path.relative_to(self.root).as_posix()
             if any(part in SKIP_DIRS for part in rel.split("/")):
                 continue
+            if path.is_symlink() and not path.is_file():
+                # A link to a directory invites a cycle; a dangling one has
+                # nothing behind it. File links are followed — repositories do
+                # symlink their LICENSE, and dropping it silently produced a
+                # blocking "no licence file anywhere" for a repository that
+                # has one.
+                self._skip(rel, "symlink to a directory or to nothing — not indexed")
+                continue
+            if not path.is_file():
+                continue
+            if len(found) >= MAX_FILES:
+                self.truncated += 1
+                continue
             found.append(rel)
         return found
+
+    def _skip(self, rel: str, why: str) -> None:
+        """Record a path this view could not read, and the reason.
+
+        A file that was not read is not a file that said nothing, and nothing
+        else in this program can tell the two apart: every check works from
+        `read()` returning a string. `survey_repo` turns these into
+        `inconclusive` entries, which `gate.py` turns into `unknown`.
+        """
+        self.skipped.setdefault(rel, why)
 
     def read(self, rel: str) -> str | None:
         """Text of one file, or None if it is binary, huge or unreadable."""
@@ -252,11 +284,18 @@ class Repo:
         path = self.root / rel
         if Path(rel).suffix.lower() not in BINARY_SUFFIXES:
             try:
-                if path.stat().st_size <= MAX_FILE_BYTES:
+                size = path.stat().st_size
+                if size <= MAX_FILE_BYTES:
                     text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                text = None
+                else:
+                    self._skip(
+                        rel,
+                        f"{size / 1e6:.1f} MB, over the {MAX_FILE_BYTES / 1e6:.0f} MB read limit",
+                    )
+            except OSError as exc:
+                self._skip(rel, f"could not be read ({exc.strerror or exc})")
         if text is not None and "\x00" in text[:4096]:
+            self._skip(rel, "NUL bytes despite a text suffix — treated as binary")
             text = None
         self._cache[rel] = text
         return text
@@ -399,6 +438,16 @@ def check_license(survey: Survey) -> None:
     repo = survey.repo
     files = [p for p in repo.paths if _looks_like_license(p) and not repo.is_vendored(p)]
     if not files:
+        # "None found" and "none the index could open" are different claims,
+        # and only the first justifies the strongest finding this script emits.
+        unseen = sorted(rel for rel in repo.skipped if _looks_like_license(rel))
+        if unseen:
+            survey.unknown(
+                "license.absent",
+                f"no licence file could be read, and {', '.join(unseen)} was skipped by the "
+                "file index — open it by hand before concluding there is no grant",
+            )
+            return
         survey.add(
             id="license.absent",
             layer="license",
@@ -929,6 +978,35 @@ def _check_os_constraint(survey: Survey) -> None:
 _UBUNTU_GLIBC = {"18.04": "2.27", "20.04": "2.31", "22.04": "2.35", "24.04": "2.39"}
 
 
+def _vram_figures(line: str) -> list[float]:
+    """GB figures on this line that are actually about video memory.
+
+    Taking every size on a matching line read "24 GB VRAM, 64 GB system RAM"
+    as two VRAM figures, and the smaller-is-the-minimum rule below then gated
+    on the wrong one. So the line is cut into clauses and a figure only counts
+    inside a clause that says what the memory is for. Markdown tables get one
+    allowance, because `| VRAM | 24 GB |` puts the label and the number in
+    adjacent cells.
+    """
+    stripped = line.strip()
+    if stripped.startswith("|") and stripped.count("|") >= 2:
+        cells = stripped.strip("|").split("|")
+        clauses = [f"{a} {b}" for a, b in zip(cells, cells[1:])] or cells
+    else:
+        clauses = VRAM_WINDOW.split(stripped)
+
+    figures: list[float] = []
+    for clause in clauses:
+        if not VRAM_TOKEN.search(clause):
+            continue
+        figures += [
+            float(amount)
+            for amount, unit in SIZE.findall(clause)
+            if unit.upper() == "GB" and 4 <= float(amount) <= 200
+        ]
+    return figures
+
+
 def check_hardware(survey: Survey) -> None:
     repo = survey.repo
     docs = repo.docs()
@@ -950,10 +1028,9 @@ def check_hardware(survey: Survey) -> None:
         )
 
     vram: list[tuple[str, int, str, float]] = []
-    for rel, number, line in repo.grep(VRAM_LINE, docs):
-        for amount, unit in SIZE.findall(line):
-            if unit.upper() == "GB" and 4 <= float(amount) <= 200:
-                vram.append((rel, number, line, float(amount)))
+    for rel, number, line in repo.grep(VRAM_TOKEN, docs):
+        for amount in _vram_figures(line):
+            vram.append((rel, number, line, amount))
     if vram:
         smallest = min(vram, key=lambda item: item[3])
         largest = max(vram, key=lambda item: item[3])
@@ -1051,6 +1128,33 @@ def check_handoff(survey: Survey) -> None:
 CHECKS = (check_license, check_weights, check_data, check_env, check_hardware, check_handoff)
 
 
+def _record_gaps(survey: Survey) -> None:
+    """Turn what the file view could not see into inconclusive entries.
+
+    Runs after the checks, because `Repo.read` is lazy: until a check asks for
+    a file, nothing has failed to read it. Without this the two most damaging
+    silences in the whole script were invisible — an accession list over the
+    size limit dropped its blocking finding, and an unreadable build script
+    dropped three env findings, both reported as a clean survey.
+    """
+    repo = survey.repo
+    if repo.truncated:
+        survey.unknown(
+            "files.index-truncated",
+            f"the index stopped at {MAX_FILES} files with {repo.truncated} left over — "
+            "every check below read a partial tree",
+        )
+    if repo.skipped:
+        shown = sorted(repo.skipped.items())[:6]
+        listed = "; ".join(f"{rel} ({why})" for rel, why in shown)
+        rest = len(repo.skipped) - len(shown)
+        more = f"; and {rest} more" if rest else ""
+        survey.unknown(
+            "files.unread",
+            f"{len(repo.skipped)} file(s) could not be read: {listed}{more}",
+        )
+
+
 def git_facts(root: Path) -> dict[str, Any]:
     """Best-effort provenance. Absent git, absent answers — never a guess."""
 
@@ -1086,6 +1190,7 @@ def survey_repo(root: Path) -> dict[str, Any]:
     survey = Survey(repo)
     for check in CHECKS:
         check(survey)
+    _record_gaps(survey)
 
     return {
         "schema": SCHEMA,
@@ -1093,6 +1198,8 @@ def survey_repo(root: Path) -> dict[str, Any]:
             "root": str(root.resolve()),
             "name": root.resolve().name,
             "files_indexed": len(repo.paths),
+            "files_unread": len(repo.skipped),
+            "files_over_index_limit": repo.truncated,
             "git": git_facts(root),
         },
         "findings": [f.to_dict() for f in by_severity(survey.findings)],
