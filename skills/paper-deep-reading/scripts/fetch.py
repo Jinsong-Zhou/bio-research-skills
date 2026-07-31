@@ -13,9 +13,12 @@ guessed at.
 
 Writes a JSON report to stdout; progress goes to stderr.
 
-The one thing this script will not do is hand back a file that is not a PDF.
-Every route here can answer with HTTP 200 and an HTML page, and a downloader
-that trusts the status code saves the paywall notice as ``paper.pdf``.
+The one thing this script will not do is *download* a file that is not a whole
+PDF. Every route here can answer with HTTP 200 and an HTML page, and a
+downloader that trusts the status code saves the paywall notice as
+``paper.pdf``; a connection cut mid-body leaves a file that opens fine and is
+missing its discussion. A local path you pass in is your call — it is reported
+with a warning rather than refused.
 """
 
 from __future__ import annotations
@@ -27,7 +30,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from _http import FetchError, NotAPdfError, describe_non_pdf, download_pdf, fetch_json
+from _http import (
+    FetchError,
+    NotAPdfError,
+    TruncatedPdfError,
+    describe_non_pdf,
+    download_pdf,
+    fetch_json,
+)
 
 BIORXIV_API = "https://api.biorxiv.org/details"
 EUROPEPMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -64,6 +74,26 @@ _URLISH = re.compile(r"^(?:[a-z][a-z0-9+.-]*://|[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}/)
 
 class ResolutionError(RuntimeError):
     """The reference could not be turned into anything fetchable."""
+
+
+class SourceUnavailableError(ResolutionError):
+    """A source could not be reached, so its silence proves nothing.
+
+    The distinction this draws is the whole point of it. ``resolve_preprint``
+    used to swallow every transport failure and end at "not on bioRxiv or
+    medRxiv" — a statement about the paper, made when the truth was a
+    statement about the network. A ``ResolutionError`` subclass so the
+    existing fallbacks still fire; a separate type so the fallback can say
+    what it is covering for.
+    """
+
+
+class IdentityMismatchError(ResolutionError):
+    """The record that came back is not the one that was asked for.
+
+    Every field downstream — title, authors, PDF URL — would describe the
+    other paper, and nothing in the report would say so.
+    """
 
 
 def _bare_arxiv(value: str) -> str | None:
@@ -175,10 +205,15 @@ def resolve_preprint(doi: str) -> dict[str, Any]:
     The DOI alone does not say whether a ``10.1101/`` record is on bioRxiv or
     medRxiv, and the PDF URL needs both the server and the version number.
     """
+    unreachable: list[str] = []
     for server in ("biorxiv", "medrxiv"):
         try:
             payload = fetch_json(f"{BIORXIV_API}/{server}/{doi}")
-        except FetchError:
+        except FetchError as exc:
+            # Not the same as "no such record". Collected rather than ignored,
+            # because a server that did not answer cannot be quoted as saying
+            # the preprint does not exist.
+            unreachable.append(f"{server} ({exc})")
             continue
 
         collection = payload.get("collection") or []
@@ -187,6 +222,11 @@ def resolve_preprint(doi: str) -> dict[str, Any]:
 
         # The API returns one entry per version, oldest first.
         latest = collection[-1]
+        returned_doi = str(latest.get("doi") or "").strip()
+        if returned_doi and returned_doi.lower() != doi.strip().lower():
+            raise IdentityMismatchError(
+                f"{server} answered {doi} with a record for {returned_doi}"
+            )
         version = latest.get("version") or "1"
         return {
             "kind": server,
@@ -201,6 +241,10 @@ def resolve_preprint(doi: str) -> dict[str, Any]:
                 "date": latest.get("date", ""),
                 "category": latest.get("category", ""),
             },
+            # The API returns the abstract and this route used to drop it, so
+            # a preprint whose PDF failed reported "abstract-only" with no
+            # abstract — the one state in which there is nothing to write from.
+            "abstract": latest.get("abstract"),
             # Set when the preprint has since appeared in a journal. Worth
             # surfacing: the version under review may differ from this one.
             # Unpublished records carry the literal string "NA", not an empty
@@ -209,6 +253,11 @@ def resolve_preprint(doi: str) -> dict[str, Any]:
             "published_as": _published_doi(latest.get("published")),
         }
 
+    if unreachable:
+        raise SourceUnavailableError(
+            f"could not reach {' and '.join(unreachable)}, so whether {doi} is a "
+            "preprint is unknown rather than answered"
+        )
     raise ResolutionError(f"{doi} is not on bioRxiv or medRxiv")
 
 
@@ -220,6 +269,24 @@ def _published_doi(raw: Any) -> str | None:
     """The journal DOI a preprint became, or None if it is still unpublished."""
     value = (raw or "").strip()
     return None if value.upper() in ("", "NA") else value
+
+
+def _identity_mismatch(record: dict[str, Any], kind: str, value: str) -> str | None:
+    """The record's own identifier, when it disagrees with what was asked for.
+
+    Europe PMC's query language is exact, so a disagreement is not a near
+    miss — it means a different paper came back, and the title, authors and
+    PDF URL taken from it would all describe that other paper while the
+    report kept the requested reference at the top.
+
+    A record that simply omits the field is not a mismatch: absence is not
+    disagreement, and refusing on it would break lookups that work.
+    """
+    field = {"doi": "doi", "pmcid": "pmcid"}.get(kind, "id")
+    got = str(record.get(field) or "").strip()
+    if not got:
+        return None
+    return None if got.lower() == value.strip().lower() else got
 
 
 def _europepmc_query(kind: str, value: str) -> str:
@@ -251,6 +318,11 @@ def resolve_europepmc(kind: str, value: str) -> dict[str, Any]:
         raise ResolutionError(f"Europe PMC has no record for {value}")
 
     record = results[0]
+    mismatch = _identity_mismatch(record, kind, value)
+    if mismatch:
+        raise IdentityMismatchError(
+            f"Europe PMC answered {value} with a record for {mismatch}"
+        )
     pmcid = record.get("pmcid")
     resolved: dict[str, Any] = {
         "kind": "europepmc",
@@ -281,11 +353,30 @@ def resolve_europepmc(kind: str, value: str) -> dict[str, Any]:
     return resolved
 
 
+def _covering_for(
+    resolved: dict[str, Any], failure: ResolutionError, instead: str
+) -> dict[str, Any]:
+    """Attach a warning when a fallback is standing in for an unreachable source.
+
+    Without this the substitution is invisible: bioRxiv 503s, Europe PMC has a
+    metadata-only record for the same preprint, and the user is told there is
+    no open-access PDF for a paper whose PDF is one request away.
+    """
+    if isinstance(failure, SourceUnavailableError):
+        resolved.setdefault("warnings", []).append(
+            f"{failure}; this record came from {instead} instead, which lags on "
+            "preprints and often does not hold their PDFs"
+        )
+    return resolved
+
+
 def resolve(kind: str, value: str) -> dict[str, Any]:
     """Pick a route. The DOI prefix is a hint about which to try first, not a gate.
 
     Preprint prefixes are shared with journal publishers and change over time,
-    so both orders end in the same fallback: whichever route was not tried.
+    so both orders end in the same fallback for a DOI: whichever route was not
+    tried. A PMCID or a PMID has only the one route — neither means anything
+    to bioRxiv.
     """
     if kind == "arxiv":
         return resolve_arxiv(value)
@@ -293,24 +384,44 @@ def resolve(kind: str, value: str) -> dict[str, Any]:
     if kind == "doi" and value.startswith(PREPRINT_DOI_PREFIXES):
         try:
             return resolve_preprint(value)
-        except ResolutionError:
+        except IdentityMismatchError:
+            # The server answered with someone else's paper. Falling back
+            # would paper over that; it is worth stopping for.
+            raise
+        except ResolutionError as preprint_error:
             # A preprint-prefixed DOI the servers disown is usually a journal
             # article from a publisher sharing the prefix.
-            return resolve_europepmc("doi", value)
+            return _covering_for(
+                resolve_europepmc("doi", value), preprint_error, "Europe PMC"
+            )
 
     try:
         return resolve_europepmc(kind, value)
+    except IdentityMismatchError:
+        raise
     except ResolutionError as epmc_error:
         if kind != "doi":
             raise
         # Europe PMC indexes preprints but lags; a DOI it has never heard of
         # may still be a preprint posted under a prefix we do not know about.
         try:
-            return resolve_preprint(value)
-        except ResolutionError:
-            # Report that both routes were tried. Letting the preprint error
-            # surface alone reads as "this is not a preprint", when what
-            # actually happened is that nothing has a record of it.
+            return _covering_for(resolve_preprint(value), epmc_error, "bioRxiv/medRxiv")
+        except IdentityMismatchError:
+            raise
+        except ResolutionError as preprint_error:
+            # Report that both routes were tried, and whether either of them
+            # failed to answer at all. The preprint error alone reads as
+            # "this is not a preprint", when what actually happened may be
+            # that nothing has a record of it — or that nothing replied.
+            unreachable = [
+                str(e)
+                for e in (epmc_error, preprint_error)
+                if isinstance(e, SourceUnavailableError)
+            ]
+            if unreachable:
+                raise SourceUnavailableError(
+                    f"{value} could not be looked up: {'; '.join(unreachable)}"
+                ) from epmc_error
             raise ResolutionError(
                 f"{value} is in neither Europe PMC nor bioRxiv/medRxiv ({epmc_error})"
             ) from epmc_error
@@ -350,6 +461,7 @@ def build_report(reference: str, out_dir: Path) -> dict[str, Any]:
     abstract = resolved.pop("abstract", None)
     published_as = resolved.pop("published_as", None)
     open_access = resolved.pop("open_access", None)
+    warnings.extend(resolved.pop("warnings", []))
 
     if published_as:
         warnings.append(
@@ -369,24 +481,42 @@ def build_report(reference: str, out_dir: Path) -> dict[str, Any]:
         "warnings": warnings,
     }
 
+    def without_full_text() -> dict[str, Any]:
+        """The abstract-only report, saying plainly when there is not even one."""
+        if not abstract:
+            warnings.append(
+                "no abstract was retrieved either — there is nothing here to read, "
+                "and a note written from this report would have no source at all"
+            )
+        return report
+
     if not resolved.get("pdf_url"):
         warnings.append("no open-access PDF is available for this record")
-        return report
+        return without_full_text()
 
     dest = out_dir / f"{_safe_stem(resolved)}.pdf"
     print(f"downloading {resolved['pdf_url']}", file=sys.stderr)
     try:
-        size = download_pdf(resolved["pdf_url"], dest)
+        response = download_pdf(resolved["pdf_url"], dest)
     except NotAPdfError as exc:
         warnings.append(f"{describe_non_pdf(exc)} ({exc.url})")
-        return report
+        return without_full_text()
+    except TruncatedPdfError as exc:
+        warnings.append(f"{exc} — the end of a paper is its discussion and limitations")
+        return without_full_text()
     except FetchError as exc:
         warnings.append(f"download failed: {exc}")
-        return report
+        return without_full_text()
+
+    if response.url != resolved["pdf_url"]:
+        # Provenance: the bytes came from somewhere other than the address
+        # asked for, and only this line says where.
+        report["pdf_source_url"] = response.url
+        warnings.append(f"the PDF request was redirected to {response.url}")
 
     report["fulltext"] = "full"
     report["path"] = str(dest)
-    report["bytes"] = size
+    report["bytes"] = len(response.body)
     return report
 
 
@@ -415,14 +545,20 @@ def main(argv: list[str] | None = None) -> int:
     except (ResolutionError, FetchError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
+    except OSError as exc:
+        # A directory passed as the reference, an unreadable file: the user
+        # pointed at something real that is not a paper.
+        print(json.dumps({"error": f"cannot read {args.reference}: {exc}"}, indent=2))
+        return 1
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["fulltext"] == "abstract-only":
-        print(
-            "WARNING: no full text. Anything you write from the abstract alone "
-            "is a summary, not a deep read.",
-            file=sys.stderr,
+        detail = (
+            "Anything you write from the abstract alone is a summary, not a deep read."
+            if report.get("abstract")
+            else "There is no abstract either — do not write a note from this."
         )
+        print(f"WARNING: no full text. {detail}", file=sys.stderr)
     return 0
 
 

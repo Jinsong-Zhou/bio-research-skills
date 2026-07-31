@@ -10,9 +10,20 @@ from pathlib import Path
 import _http
 import fetch
 import pytest
-from _http import NotAPdfError, describe_non_pdf, download_pdf
+from _http import NotAPdfError, Response, TruncatedPdfError, describe_non_pdf, download_pdf
 
-MINIMAL_PDF = b"%PDF-1.7\n" + b"x" * 8192
+#: A body that clears every guard: the magic bytes, the size floor, and the
+#: trailer that says it is not cut short.
+MINIMAL_PDF = b"%PDF-1.7\n" + b"x" * 8192 + b"\n%%EOF\n"
+
+
+def served(body: bytes, url: str = "https://example.invalid/x.pdf", length=...) -> Response:
+    """A response carrying ``body``, with a Content-Length that agrees with it.
+
+    ``length`` is explicit in the tests that care: a header disagreeing with
+    the body is exactly what truncation looks like.
+    """
+    return Response(body, url, len(body) if length is ... else length)
 
 
 class TestIdentifierParsing:
@@ -149,14 +160,49 @@ class TestPublishedField:
 
 
 class TestDownloadGuards:
-    def _serve(self, monkeypatch, body: bytes):
-        monkeypatch.setattr(_http, "fetch", lambda *a, **k: body)
+    def _serve(self, monkeypatch, body: bytes, **kwargs):
+        monkeypatch.setattr(_http, "fetch_response", lambda *a, **k: served(body, **kwargs))
 
     def test_a_real_pdf_is_written(self, monkeypatch, tmp_path):
         self._serve(monkeypatch, MINIMAL_PDF)
         dest = tmp_path / "out.pdf"
-        assert download_pdf("https://example.invalid/x.pdf", dest) == len(MINIMAL_PDF)
+        assert download_pdf("https://example.invalid/x.pdf", dest).body == MINIMAL_PDF
         assert dest.read_bytes() == MINIMAL_PDF
+
+    def test_a_body_shorter_than_its_content_length_is_refused(self, monkeypatch, tmp_path):
+        """What truncation removes is the end — the discussion, the
+        limitations, the supplementary material, which is most of what an
+        assessment is built from. A magic-byte check cannot see it, and the
+        file opens fine."""
+        self._serve(monkeypatch, MINIMAL_PDF, length=len(MINIMAL_PDF) + 5000)
+        dest = tmp_path / "out.pdf"
+        with pytest.raises(TruncatedPdfError, match="of .* bytes"):
+            download_pdf("https://example.invalid/x.pdf", dest)
+        assert not dest.exists()
+
+    def test_a_pdf_with_no_end_marker_is_refused(self, monkeypatch, tmp_path):
+        """The other truncation shape: no Content-Length to compare against,
+        so the missing %%EOF is the only evidence."""
+        self._serve(monkeypatch, b"%PDF-1.7\n" + b"x" * 8192, length=None)
+        dest = tmp_path / "out.pdf"
+        with pytest.raises(TruncatedPdfError, match="no end marker"):
+            download_pdf("https://example.invalid/x.pdf", dest)
+        assert not dest.exists()
+
+    def test_the_address_the_bytes_came_from_is_returned(self, monkeypatch, tmp_path):
+        """A caller that records only the requested URL cannot show where a
+        redirect ended up."""
+        self._serve(monkeypatch, MINIMAL_PDF, url="https://cdn.example.invalid/real.pdf")
+        response = download_pdf("https://example.invalid/x.pdf", tmp_path / "out.pdf")
+        assert response.url == "https://cdn.example.invalid/real.pdf"
+
+    def test_a_bad_pdf_is_caught_by_except_fetch_error(self, monkeypatch, tmp_path):
+        """download_pdf documents NotAPdfError and FetchError together as its
+        raise set; a guard that did not actually catch the first would have a
+        hole in it exactly where a paywall page gets saved as paper.pdf."""
+        self._serve(monkeypatch, b"<html>Sign in</html>" + b" " * 9000)
+        with pytest.raises(_http.FetchError):
+            download_pdf("https://example.invalid/x.pdf", tmp_path / "out.pdf")
 
     def test_an_html_page_served_with_200_is_refused(self, monkeypatch, tmp_path):
         self._serve(monkeypatch, b"<!DOCTYPE html><html><body>Sign in</body></html>" + b" " * 9000)
@@ -176,11 +222,181 @@ class TestDownloadGuards:
             download_pdf("https://example.invalid/x.pdf", tmp_path / "out.pdf")
         assert "browser" in describe_non_pdf(excinfo.value)
 
-    def test_a_paywall_page_is_described_as_one(self, monkeypatch, tmp_path):
-        self._serve(monkeypatch, b"<html>Purchase access</html>" + b" " * 9000)
-        with pytest.raises(NotAPdfError) as excinfo:
-            download_pdf("https://example.invalid/x.pdf", tmp_path / "out.pdf")
-        assert "paywall" in describe_non_pdf(excinfo.value)
+    @pytest.mark.parametrize(
+        ("head", "size", "expected"),
+        [
+            (b"<html>cloudflare captcha</html>", 9000, "browser"),
+            (b"<!DOCTYPE html><body>Purchase access", 9000, "paywall"),
+            (b"%PDF-1.4\nplaceholder", 20, "too small to be a paper"),
+            (b"\x00\x01\x02 binary junk", 9000, "not a PDF"),
+        ],
+    )
+    def test_each_kind_of_wrong_body_gets_its_own_advice(self, head, size, expected):
+        """A bot check, a paywall, a placeholder and a mystery need four
+        different next moves. The paywall case used to be asserted against a
+        branch that returns the same string for *any* HTML, so it would have
+        passed with the discrimination deleted."""
+        assert expected in describe_non_pdf(NotAPdfError("https://x/y", head, size))
+
+
+def biorxiv_payload(doi="10.64898/2026.07.16.739021", **overrides):
+    """A two-version bioRxiv response, shaped like the real one.
+
+    The details that matter are the ones measured in
+    ``references/fulltext-sources.md``: one entry per version oldest first,
+    ``published`` as the literal string ``"NA"`` rather than an empty field,
+    and authors separated by semicolons.
+    """
+    def version(n, title):
+        return {
+            "doi": doi,
+            "title": title,
+            "version": str(n),
+            "authors": "Dutta, S.; Other, A.; Third, B.",
+            "date": "2026-07-16",
+            "category": "cell biology",
+            "abstract": "We report a mechanism.",
+            "published": "NA",
+            **overrides,
+        }
+
+    return {"collection": [version(1, "First submission"), version(2, "Revised title")]}
+
+
+class TestResolvePreprint:
+    """The bioRxiv/medRxiv route — one of the three the skill advertises, and
+    until now executed by no test in either suite."""
+
+    DOI = "10.64898/2026.07.16.739021"
+
+    @staticmethod
+    def _server_of(url: str) -> str:
+        # Counting path segments from the right does not work here: the DOI
+        # itself contains a slash.
+        return "medrxiv" if "/medrxiv/" in url else "biorxiv"
+
+    def _serve(self, monkeypatch, by_server):
+        calls = []
+
+        def fake(url, *args, **kwargs):
+            calls.append(self._server_of(url))
+            outcome = by_server.get(self._server_of(url))
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome if outcome is not None else {"collection": []}
+
+        monkeypatch.setattr(fetch, "fetch_json", fake)
+        return calls
+
+    def test_the_latest_version_is_the_one_resolved(self, monkeypatch):
+        """The API returns one entry per version, oldest first. Reading the
+        first would silently hand back v1 of a paper now at v2 — and the v1
+        URL still serves a valid PDF, so nothing downstream would notice."""
+        self._serve(monkeypatch, {"biorxiv": biorxiv_payload(self.DOI)})
+        resolved = fetch.resolve_preprint(self.DOI)
+        assert resolved["version"] == "2"
+        assert resolved["metadata"]["title"] == "Revised title"
+        assert resolved["pdf_url"].endswith("v2.full.pdf")
+
+    def test_medrxiv_is_tried_when_biorxiv_has_no_record(self, monkeypatch):
+        calls = self._serve(monkeypatch, {"medrxiv": biorxiv_payload(self.DOI)})
+        assert fetch.resolve_preprint(self.DOI)["kind"] == "medrxiv"
+        assert calls == ["biorxiv", "medrxiv"]
+
+    def test_an_unpublished_preprint_is_not_reported_as_published(self, monkeypatch):
+        """bioRxiv writes the literal "NA". A truthiness check here reported
+        every preprint as already published — the bug _published_doi exists
+        for, tested in isolation but never through the code that calls it."""
+        self._serve(monkeypatch, {"biorxiv": biorxiv_payload(self.DOI)})
+        assert fetch.resolve_preprint(self.DOI)["published_as"] is None
+
+    def test_a_journal_version_is_carried_through(self, monkeypatch):
+        self._serve(
+            monkeypatch,
+            {"biorxiv": biorxiv_payload(self.DOI, published="10.1038/s41586-021-03819-2")},
+        )
+        assert fetch.resolve_preprint(self.DOI)["published_as"] == (
+            "10.1038/s41586-021-03819-2"
+        )
+
+    def test_authors_are_split_on_semicolons(self, monkeypatch):
+        """Live data is "Dutta, S.; Other, A." — splitting on commas shatters
+        each name into surname and initial."""
+        self._serve(monkeypatch, {"biorxiv": biorxiv_payload(self.DOI)})
+        assert fetch.resolve_preprint(self.DOI)["metadata"]["authors"] == [
+            "Dutta, S.", "Other, A.", "Third, B."
+        ]
+
+    def test_the_abstract_is_carried_through(self, monkeypatch):
+        """It used to be dropped, so a preprint whose PDF failed reported
+        "abstract-only" with no abstract — the one state in which there is
+        nothing at all to write from."""
+        self._serve(monkeypatch, {"biorxiv": biorxiv_payload(self.DOI)})
+        assert fetch.resolve_preprint(self.DOI)["abstract"] == "We report a mechanism."
+
+    def test_a_record_for_a_different_doi_is_refused(self, monkeypatch):
+        self._serve(monkeypatch, {"biorxiv": biorxiv_payload(doi="10.64898/someone.else")})
+        with pytest.raises(fetch.IdentityMismatchError, match="someone.else"):
+            fetch.resolve_preprint(self.DOI)
+
+    def test_a_server_that_did_not_answer_is_not_quoted_as_saying_no(self, monkeypatch):
+        """`except FetchError: continue` made a 503 read exactly like "no such
+        record", so an outage became the factual claim "this is not a
+        preprint" — about a paper whose PDF was one request away."""
+        self._serve(
+            monkeypatch,
+            {
+                "biorxiv": _http.FetchError("HTTP 503"),
+                "medrxiv": _http.FetchError("HTTP 503"),
+            },
+        )
+        with pytest.raises(fetch.SourceUnavailableError, match="unknown rather than answered"):
+            fetch.resolve_preprint(self.DOI)
+
+    def test_a_genuine_absence_still_says_so(self, monkeypatch):
+        """Both servers answered, neither has it. That is a fact about the
+        paper, and it must not be dressed up as an outage."""
+        self._serve(monkeypatch, {})
+        with pytest.raises(fetch.ResolutionError, match="not on bioRxiv or medRxiv") as excinfo:
+            fetch.resolve_preprint(self.DOI)
+        assert not isinstance(excinfo.value, fetch.SourceUnavailableError)
+
+
+class TestIdentityChecks:
+    def _epmc(self, monkeypatch, record):
+        monkeypatch.setattr(
+            fetch, "fetch_json", lambda *a, **k: {"resultList": {"result": [record]}}
+        )
+
+    def test_europe_pmc_answering_with_a_different_paper_is_refused(self, monkeypatch):
+        """The query language is exact, so a disagreement is not a near miss.
+        Every field downstream — title, authors, PDF URL — would describe the
+        other paper while the report kept the requested reference on top."""
+        self._epmc(monkeypatch, {"doi": "10.1038/other", "id": "999", "title": "Someone else"})
+        with pytest.raises(fetch.IdentityMismatchError, match="10.1038/other"):
+            fetch.resolve_europepmc("doi", "10.1073/pnas.1234567890")
+
+    def test_a_case_difference_is_not_a_mismatch(self, monkeypatch):
+        """DOIs are case-insensitive; refusing on case would break lookups."""
+        self._epmc(monkeypatch, {"doi": "10.1038/S41586-021-03819-2", "id": "1"})
+        assert fetch.resolve_europepmc("doi", "10.1038/s41586-021-03819-2")
+
+    def test_a_record_that_omits_the_field_is_not_a_mismatch(self, monkeypatch):
+        """Absence is not disagreement, and refusing on it would break records
+        Europe PMC simply does not carry a DOI for."""
+        self._epmc(monkeypatch, {"id": "34265844", "title": "A paper"})
+        assert fetch.resolve_europepmc("doi", "10.1038/s41586-021-03819-2")
+
+    def test_a_mismatch_is_not_papered_over_by_the_fallback(self, monkeypatch):
+        """The other routes exist for "nobody has this", not for "somebody
+        answered with the wrong thing"."""
+        def wrong(kind, value):
+            raise fetch.IdentityMismatchError("answered with a record for 10.1038/other")
+
+        monkeypatch.setattr(fetch, "resolve_europepmc", wrong)
+        monkeypatch.setattr(fetch, "resolve_preprint", lambda doi: {"kind": "biorxiv"})
+        with pytest.raises(fetch.IdentityMismatchError):
+            fetch.resolve("doi", "10.9999/x")
 
 
 class TestRouting:
@@ -217,6 +433,40 @@ class TestRouting:
         monkeypatch.setattr(fetch, "resolve_europepmc", unknown)
         with pytest.raises(fetch.ResolutionError):
             fetch.resolve("pmcid", "PMC999999999")
+
+    def test_a_fallback_covering_for_an_outage_says_so(self, monkeypatch):
+        """bioRxiv 503s, Europe PMC has a metadata-only record for the same
+        preprint, and the user is told there is no open-access PDF — for a
+        paper whose PDF is one request away. Without this warning the
+        substitution is invisible."""
+        def unreachable(doi):
+            raise fetch.SourceUnavailableError("could not reach biorxiv (HTTP 503)")
+
+        monkeypatch.setattr(fetch, "resolve_preprint", unreachable)
+        monkeypatch.setattr(fetch, "resolve_europepmc", lambda k, v: {"kind": "europepmc"})
+        resolved = fetch.resolve("doi", "10.1101/2024.01.15.575681")
+        assert any("could not reach biorxiv" in w for w in resolved["warnings"])
+        assert any("Europe PMC instead" in w for w in resolved["warnings"])
+
+    def test_a_clean_fallback_adds_no_warning(self, monkeypatch):
+        """A preprint-prefixed DOI that is genuinely a journal article is an
+        ordinary outcome, not something to caveat."""
+        def disown(doi):
+            raise fetch.ResolutionError("not here")
+
+        monkeypatch.setattr(fetch, "resolve_preprint", disown)
+        monkeypatch.setattr(fetch, "resolve_europepmc", lambda k, v: {"kind": "europepmc"})
+        assert "warnings" not in fetch.resolve("doi", "10.1101/journal.article")
+
+    def test_two_unreachable_sources_do_not_become_a_verdict(self, monkeypatch):
+        """Neither answered, so "nobody has this" is not something we know."""
+        def unreachable(*args):
+            raise fetch.SourceUnavailableError("could not reach it")
+
+        monkeypatch.setattr(fetch, "resolve_europepmc", unreachable)
+        monkeypatch.setattr(fetch, "resolve_preprint", unreachable)
+        with pytest.raises(fetch.SourceUnavailableError, match="could not be looked up"):
+            fetch.resolve("doi", "10.99999/nothing.here")
 
     def test_a_doi_nobody_has_says_both_routes_were_tried(self, monkeypatch):
         """The preprint error alone reads as "this is not a preprint", which
@@ -259,7 +509,11 @@ class TestReport:
             "resolve",
             lambda kind, value: {"kind": "biorxiv", "id": "10.64898/x", "pdf_url": "https://x/y"},
         )
-        monkeypatch.setattr(_http, "fetch", lambda *a, **k: b"<html>Sign in</html>" + b" " * 9000)
+        monkeypatch.setattr(
+            _http,
+            "fetch_response",
+            lambda *a, **k: served(b"<html>Sign in</html>" + b" " * 9000),
+        )
         report = fetch.build_report("10.64898/x", tmp_path)
         assert report["fulltext"] == "abstract-only"
         assert report["path"] is None
@@ -276,7 +530,7 @@ class TestReport:
                 "published_as": "10.1038/s41586-021-03819-2",
             },
         )
-        monkeypatch.setattr(_http, "fetch", lambda *a, **k: MINIMAL_PDF)
+        monkeypatch.setattr(_http, "fetch_response", lambda *a, **k: served(MINIMAL_PDF))
         report = fetch.build_report("10.64898/x", tmp_path)
         assert report["fulltext"] == "full"
         assert any("later published as" in w for w in report["warnings"])
@@ -299,25 +553,59 @@ class TestReport:
                 "pdf_url": "https://x/y",
             },
         )
-        monkeypatch.setattr(_http, "fetch", lambda *a, **k: MINIMAL_PDF)
+        monkeypatch.setattr(_http, "fetch_response", lambda *a, **k: served(MINIMAL_PDF))
         report = fetch.build_report("10.64898/2026.07.16.739021", tmp_path)
         assert Path(report["path"]).name == "10.64898-2026.07.16.739021.pdf"
 
 
 @pytest.mark.live
 class TestLiveBehaviour:
-    def test_biorxiv_still_accepts_the_new_doi_prefix(self):
-        """If this fails, 10.64898 was retired and the prefix list needs a look."""
-        payload = _http.fetch_json("https://api.biorxiv.org/details/biorxiv/2026-07-20/2026-07-22/0")
+    WINDOW = "https://api.biorxiv.org/details/biorxiv/2026-07-20/2026-07-22/0"
+
+    def test_biorxiv_issues_no_prefix_we_do_not_route(self):
+        payload = _http.fetch_json(self.WINDOW)
         prefixes = {e["doi"].split("/")[0] + "/" for e in payload.get("collection", [])}
         assert prefixes, "bioRxiv returned no records for a known-good window"
         assert prefixes <= set(fetch.PREPRINT_DOI_PREFIXES), (
             f"bioRxiv is issuing a prefix we do not route: {prefixes}"
         )
 
+    def test_the_newer_prefix_is_still_in_use(self):
+        """The subset assertion above cannot catch a *retired* prefix — if
+        10.64898 vanished, the remaining set would still be a subset and the
+        test would pass. This is the other direction, which is what the
+        docstring up there used to claim and could not deliver."""
+        payload = _http.fetch_json(self.WINDOW)
+        prefixes = {e["doi"].split("/")[0] + "/" for e in payload.get("collection", [])}
+        assert "10.64898/" in prefixes, (
+            f"10.64898 is no longer being issued; the prefix list needs a look ({prefixes})"
+        )
+
+    def test_an_unpublished_preprint_still_carries_the_literal_string_NA(self):
+        """_published_doi is built around this. Unit-tested against a constant
+        the test itself supplies, which re-checks our own code rather than
+        upstream — if bioRxiv switched to "n/a", both suites stayed green and
+        every preprint got a false "later published as" warning."""
+        payload = _http.fetch_json(self.WINDOW)
+        published = {str(e.get("published")) for e in payload.get("collection", [])}
+        assert "NA" in published, f"bioRxiv no longer writes NA: {published}"
+
+    def test_the_details_endpoint_answers_a_doi_under_the_newer_prefix(self):
+        payload = _http.fetch_json(
+            "https://api.biorxiv.org/details/biorxiv/10.64898/2026.07.16.739021"
+        )
+        assert payload.get("collection"), payload
+
+    def test_a_preprint_resolves_end_to_end_and_serves_a_whole_pdf(self, tmp_path):
+        """bioRxiv is the source most likely to answer a PDF request with an
+        interstitial, and it was the one whose download was never live-tested."""
+        resolved = fetch.resolve_preprint("10.64898/2026.07.16.739021")
+        assert resolved["kind"] in ("biorxiv", "medrxiv")
+        assert download_pdf(resolved["pdf_url"], tmp_path / "p.pdf").body[:5] == b"%PDF-"
+
     def test_arxiv_serves_a_pdf_at_the_constructed_url(self, tmp_path):
         resolved = fetch.resolve_arxiv("1706.03762")
-        assert download_pdf(resolved["pdf_url"], tmp_path / "a.pdf") > 100_000
+        assert len(download_pdf(resolved["pdf_url"], tmp_path / "a.pdf").body) > 100_000
 
     def test_europe_pmc_reports_open_access_and_a_pdf_url_for_an_oa_record(self):
         resolved = fetch.resolve_europepmc("pmcid", "PMC13222519")
