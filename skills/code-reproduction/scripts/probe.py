@@ -86,6 +86,23 @@ def probe_python() -> dict[str, Any]:
     }
 
 
+def _could_not_ask(why: str) -> dict[str, Any]:
+    """No answer about the GPU, and no pretence of one.
+
+    Written once rather than twice so the two ways of failing to ask cannot
+    drift apart — which is how `determined` would go missing from one of them
+    and turn "could not ask" back into "there is no card".
+    """
+    return {
+        "available": False,
+        "determined": False,
+        "why": why,
+        "devices": [],
+        "vram_gb": None,
+        "cuda": None,
+    }
+
+
 def probe_gpu() -> dict[str, Any]:
     """CUDA devices via `nvidia-smi`.
 
@@ -96,25 +113,15 @@ def probe_gpu() -> dict[str, Any]:
     `platform.apple_silicon`; there is no CUDA device to report here either way.
     """
     if shutil.which("nvidia-smi") is None:
-        return {
-            "available": False,
-            "determined": False,
-            "why": "nvidia-smi is not on PATH — nothing here can see whether a CUDA device exists",
-            "devices": [],
-            "vram_gb": None,
-            "cuda": None,
-        }
+        return _could_not_ask(
+            "nvidia-smi is not on PATH — nothing here can see whether a CUDA device exists"
+        )
 
     listing = _run(["nvidia-smi", f"--query-gpu={NVIDIA_QUERY}", "--format=csv,noheader,nounits"])
     if not listing:
-        return {
-            "available": False,
-            "determined": False,
-            "why": "nvidia-smi is installed but returned nothing — driver or permission problem",
-            "devices": [],
-            "vram_gb": None,
-            "cuda": None,
-        }
+        return _could_not_ask(
+            "nvidia-smi is installed but returned nothing — driver or permission problem"
+        )
 
     devices: list[dict[str, Any]] = []
     for row in listing.splitlines():
