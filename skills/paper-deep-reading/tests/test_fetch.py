@@ -17,6 +17,11 @@ from _http import NotAPdfError, Response, TruncatedPdfError, describe_non_pdf, d
 MINIMAL_PDF = b"%PDF-1.7\n" + b"x" * 8192 + b"\n%%EOF\n"
 
 
+def _raise(exc: BaseException):
+    """Raise from inside a lambda, so a stub can fail in one line."""
+    raise exc
+
+
 def served(body: bytes, url: str = "https://example.invalid/x.pdf", length=...) -> Response:
     """A response carrying ``body``, with a Content-Length that agrees with it.
 
@@ -467,6 +472,38 @@ class TestRouting:
         monkeypatch.setattr(fetch, "resolve_preprint", unreachable)
         with pytest.raises(fetch.SourceUnavailableError, match="could not be looked up"):
             fetch.resolve("doi", "10.99999/nothing.here")
+
+    @pytest.mark.parametrize(
+        "doi",
+        ["10.1101/nothing.here", "10.9999/nothing.here"],
+    )
+    def test_both_orders_report_both_routes(self, monkeypatch, doi):
+        """Which route runs first depends on the prefix; which error the user
+        sees must not. The nested form had a combined message on the Europe
+        PMC-first path and none on the preprint-first one, so a
+        preprint-prefixed DOI that existed nowhere was reported as "Europe PMC
+        has no record" with the preprint attempt invisible."""
+        monkeypatch.setattr(
+            fetch, "resolve_europepmc", lambda k, v: _raise(fetch.ResolutionError("epmc: no"))
+        )
+        monkeypatch.setattr(
+            fetch, "resolve_preprint", lambda v: _raise(fetch.ResolutionError("preprint: no"))
+        )
+        with pytest.raises(fetch.ResolutionError) as excinfo:
+            fetch.resolve("doi", doi)
+        assert "epmc: no" in str(excinfo.value)
+        assert "preprint: no" in str(excinfo.value)
+
+    def test_a_single_route_keeps_its_own_error(self, monkeypatch):
+        """A PMCID has one route, so "in neither" would name a source that was
+        never asked."""
+        monkeypatch.setattr(
+            fetch,
+            "resolve_europepmc",
+            lambda k, v: _raise(fetch.ResolutionError("Europe PMC has no record")),
+        )
+        with pytest.raises(fetch.ResolutionError, match="^Europe PMC has no record$"):
+            fetch.resolve("pmcid", "PMC999999999")
 
     def test_a_doi_nobody_has_says_both_routes_were_tried(self, monkeypatch):
         """The preprint error alone reads as "this is not a preprint", which

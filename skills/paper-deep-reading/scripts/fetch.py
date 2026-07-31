@@ -370,61 +370,67 @@ def _covering_for(
     return resolved
 
 
+def _everything_failed(value: str, failures: list[ResolutionError]) -> ResolutionError:
+    """One error describing every route that was tried.
+
+    A single route's error alone misdescribes what happened, in whichever
+    direction it is let through: "Europe PMC has no record" reads as a
+    complete answer when the preprint servers were asked too, and "not on
+    bioRxiv or medRxiv" reads as "this is not a preprint" when the truth is
+    that nothing anywhere has heard of it.
+
+    A source that did not reply outranks one that did: "we could not look
+    this up" and "this does not exist" are different sentences, and only the
+    second is about the paper.
+    """
+    if len(failures) == 1:
+        return failures[0]
+    unreachable = [str(e) for e in failures if isinstance(e, SourceUnavailableError)]
+    if unreachable:
+        return SourceUnavailableError(f"{value} could not be looked up: {'; '.join(unreachable)}")
+    detail = "; ".join(str(e) for e in failures)
+    return ResolutionError(f"{value} is in neither Europe PMC nor bioRxiv/medRxiv ({detail})")
+
+
 def resolve(kind: str, value: str) -> dict[str, Any]:
     """Pick a route. The DOI prefix is a hint about which to try first, not a gate.
 
     Preprint prefixes are shared with journal publishers and change over time,
-    so both orders end in the same fallback for a DOI: whichever route was not
-    tried. A PMCID or a PMID has only the one route — neither means anything
-    to bioRxiv.
+    so a DOI gets both routes in either order and the same combined error if
+    neither works. A PMCID or a PMID has only the one route — neither means
+    anything to bioRxiv — and keeps its own error.
+
+    Ordering the routes in a list rather than nesting two try blocks is
+    deliberate: the nested form had a combined error on one path and not the
+    other, so which failure the user saw depended on the prefix.
     """
     if kind == "arxiv":
         return resolve_arxiv(value)
 
-    if kind == "doi" and value.startswith(PREPRINT_DOI_PREFIXES):
-        try:
-            return resolve_preprint(value)
-        except IdentityMismatchError:
-            # The server answered with someone else's paper. Falling back
-            # would paper over that; it is worth stopping for.
-            raise
-        except ResolutionError as preprint_error:
-            # A preprint-prefixed DOI the servers disown is usually a journal
-            # article from a publisher sharing the prefix.
-            return _covering_for(
-                resolve_europepmc("doi", value), preprint_error, "Europe PMC"
-            )
+    routes: list[tuple[str, Any]] = [("Europe PMC", lambda: resolve_europepmc(kind, value))]
+    if kind == "doi":
+        preprint = ("bioRxiv/medRxiv", lambda: resolve_preprint(value))
+        if value.startswith(PREPRINT_DOI_PREFIXES):
+            routes.insert(0, preprint)
+        else:
+            # Europe PMC indexes preprints but lags, so a DOI it has never
+            # heard of may still be one posted under a prefix we do not know.
+            routes.append(preprint)
 
-    try:
-        return resolve_europepmc(kind, value)
-    except IdentityMismatchError:
-        raise
-    except ResolutionError as epmc_error:
-        if kind != "doi":
-            raise
-        # Europe PMC indexes preprints but lags; a DOI it has never heard of
-        # may still be a preprint posted under a prefix we do not know about.
+    failures: list[ResolutionError] = []
+    for name, attempt in routes:
         try:
-            return _covering_for(resolve_preprint(value), epmc_error, "bioRxiv/medRxiv")
+            resolved = attempt()
         except IdentityMismatchError:
+            # Someone answered with a different paper. Falling back would
+            # paper over that; it is worth stopping for.
             raise
-        except ResolutionError as preprint_error:
-            # Report that both routes were tried, and whether either of them
-            # failed to answer at all. The preprint error alone reads as
-            # "this is not a preprint", when what actually happened may be
-            # that nothing has a record of it — or that nothing replied.
-            unreachable = [
-                str(e)
-                for e in (epmc_error, preprint_error)
-                if isinstance(e, SourceUnavailableError)
-            ]
-            if unreachable:
-                raise SourceUnavailableError(
-                    f"{value} could not be looked up: {'; '.join(unreachable)}"
-                ) from epmc_error
-            raise ResolutionError(
-                f"{value} is in neither Europe PMC nor bioRxiv/medRxiv ({epmc_error})"
-            ) from epmc_error
+        except ResolutionError as exc:
+            failures.append(exc)
+            continue
+        return _covering_for(resolved, failures[-1], name) if failures else resolved
+
+    raise _everything_failed(value, failures)
 
 
 def _safe_stem(resolved: dict[str, Any]) -> str:
