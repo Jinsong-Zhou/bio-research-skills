@@ -39,25 +39,68 @@ EUROPEPMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 #: neither can be dropped. Measured 2026-07-30: a medRxiv window returned both.
 PREPRINT_DOI_PREFIXES = ("10.1101/", "10.64898/")
 
-_ARXIV_NEW = re.compile(r"(?:arxiv[:/])?(\d{4}\.\d{4,5})(v\d+)?$", re.IGNORECASE)
-_ARXIV_OLD = re.compile(r"(?:arxiv[:/])?([a-z-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?$", re.IGNORECASE)
+#: Matched with ``fullmatch``, never ``search``. An unanchored search is what
+#: turned ``10.3389/fnins.2013.00025`` — an ordinary Frontiers DOI — into the
+#: arXiv id ``2013.00025``: the tail of that DOI has exactly the arXiv shape,
+#: ``search`` discards the prefix that says otherwise, and the paper was then
+#: reported as unavailable under a DOI this script had invented for it.
+_ARXIV_NEW = re.compile(r"(?:arxiv[:/])?(\d{4}\.\d{4,5})(v\d+)?", re.IGNORECASE)
+#: The subject class may be lowercase and hyphenated (``cond-mat.stat-mech``),
+#: not only the two uppercase letters of ``math.AG``.
+_ARXIV_OLD = re.compile(r"(?:arxiv[:/])?([a-z-]+(?:\.[A-Za-z-]+)?/\d{7})(v\d+)?", re.IGNORECASE)
 _ARXIV_URL = re.compile(r"arxiv\.org/(?:abs|pdf)/(.+?)(?:\.pdf)?/?$", re.IGNORECASE)
+#: arXiv's own DataCite DOI. Unwrapped rather than looked up, so an arXiv
+#: paper referenced by DOI still takes the arXiv route.
+_ARXIV_DOI = re.compile(r"10\.48550/arxiv\.(.+)", re.IGNORECASE)
+#: A versioned preprint landing path: the DOI, then ``v2``, then ``.full.pdf``.
+_DOI_IN_PATH = re.compile(r"(10\.\d{4,9}/[^\s?#]+?)(?:v\d+)?(?:\.full|\.pdf)*/?$")
 _DOI = re.compile(r"(10\.\d{4,9}/\S+)$")
 _PMCID = re.compile(r"(PMC\d+)", re.IGNORECASE)
-_PMID = re.compile(r"(?:pmid[:/])?(\d{6,9})$", re.IGNORECASE)
+_PMID = re.compile(r"(?:pmid[:/])?(\d{6,9})", re.IGNORECASE)
+#: A scheme, or a bare ``host.tld/…``. A DOI never matches: ``10.1101/`` has
+#: digits where the top-level domain would be.
+_URLISH = re.compile(r"^(?:[a-z][a-z0-9+.-]*://|[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}/)", re.IGNORECASE)
 
 
 class ResolutionError(RuntimeError):
     """The reference could not be turned into anything fetchable."""
 
 
+def _bare_arxiv(value: str) -> str | None:
+    """The arXiv id ``value`` *is*, or None if it merely ends with one."""
+    for pattern in (_ARXIV_NEW, _ARXIV_OLD):
+        match = pattern.fullmatch(value)
+        if match:
+            # Strip the version suffix: v1 and v3 are the same paper, and the
+            # bare id always resolves to the latest.
+            return match.group(1)
+    return None
+
+
+def _doi_in(value: str) -> str | None:
+    """The DOI ``value`` carries, if any.
+
+    The versioned landing-path form is tried first: a preprint URL ends
+    ``…575681v1.full.pdf``, and none of that belongs to the DOI.
+    """
+    versioned = _DOI_IN_PATH.search(value)
+    if versioned and "/" in versioned.group(1):
+        return versioned.group(1)
+    bare = _DOI.search(value)
+    return bare.group(1) if bare else None
+
+
 def parse_identifier(raw: str) -> tuple[str, str]:
     """Classify ``raw`` as ``(kind, id)``.
 
     ``kind`` is one of ``local``, ``arxiv``, ``doi``, ``pmcid``, ``pmid``.
-    Order matters: a bioRxiv URL contains a DOI, and an arXiv PDF URL contains
-    something that looks like neither, so URLs are unwrapped before the bare
-    forms are tried.
+
+    Order is the whole design here. The self-identifying forms go first — a
+    DOI always starts ``10.``, an arXiv URL says ``arxiv.org`` — and only then
+    the forms recognised by shape alone. Testing the shapes first misroutes
+    every reference whose tail happens to look like something else, and a
+    misroute here is not a failed lookup: it produces a confident report about
+    a paper the user did not ask for.
     """
     value = raw.strip()
 
@@ -70,33 +113,42 @@ def parse_identifier(raw: str) -> tuple[str, str]:
 
     value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value, flags=re.IGNORECASE)
 
+    was_url = bool(_URLISH.match(value))
+    if was_url:
+        # The query string belongs to whatever produced the link, not to the
+        # paper: a bioRxiv URL copied out of a feed reader carries ``?rss=1``,
+        # and left on it becomes part of the DOI. The trailing slash is what
+        # PubMed's own address bar and its Cite dialog both emit.
+        value = re.split(r"[?#]", value, maxsplit=1)[0].rstrip("/")
+
     url_match = _ARXIV_URL.search(value)
     if url_match:
         value = url_match.group(1)
 
-    for pattern in (_ARXIV_NEW, _ARXIV_OLD):
-        match = pattern.search(value)
-        if match:
-            # Strip the version suffix: v1 and v3 are the same paper, and the
-            # bare id always resolves to the latest.
-            return "arxiv", match.group(1)
+    arxiv_doi = _ARXIV_DOI.fullmatch(value)
+    if arxiv_doi:
+        value = arxiv_doi.group(1)
 
-    # A bioRxiv landing URL carries the DOI in its path, with a version suffix
-    # the DOI itself does not have.
-    doi_in_url = re.search(r"(10\.\d{4,9}/[^\s?#]+?)(?:v\d+)?(?:\.full|\.pdf)*/?$", value)
-    if doi_in_url and "/" in doi_in_url.group(1):
-        return "doi", doi_in_url.group(1)
+    doi = _doi_in(value)
+    if doi:
+        return "doi", doi
 
-    doi_match = _DOI.search(value)
-    if doi_match:
-        return "doi", doi_match.group(1)
+    arxiv_id = _bare_arxiv(value)
+    if arxiv_id:
+        return "arxiv", arxiv_id
 
-    pmcid_match = _PMCID.search(value)
+    # A URL carries its PMCID or PMID in the last path segment; anything else
+    # has to *be* one. Matching them anywhere in the string turned "Smith et
+    # al. 2024 Nature 12345678" into a PMID lookup, and taking the last
+    # segment unconditionally turned the mistyped arXiv id "cond-mat/070100"
+    # into the PMID 070100 — a real, unrelated paper either way.
+    tail = value.rsplit("/", 1)[-1] if was_url else value
+
+    pmcid_match = _PMCID.fullmatch(tail)
     if pmcid_match:
         return "pmcid", pmcid_match.group(1).upper()
 
-    # Bare digits are unambiguous: every arXiv id contains a dot or a slash.
-    pmid_match = _PMID.search(value)
+    pmid_match = _PMID.fullmatch(tail)
     if pmid_match:
         return "pmid", pmid_match.group(1)
 

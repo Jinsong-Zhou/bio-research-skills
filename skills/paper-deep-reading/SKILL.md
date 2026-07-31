@@ -24,8 +24,9 @@ scriptable and no attempt is made to script it.
 
 ## Workflow
 
-**Run the scripts from the directory holding this `SKILL.md`** — they import
-each other by bare name, so `scripts/` has to be the working root.
+**Invoke the scripts by path** — `python3 scripts/fetch.py`, from wherever you
+like. They import each other by bare name, and Python puts the script's own
+directory on `sys.path`, so `scripts/` becomes the import root on its own.
 
 ### 1. Get the paper
 
@@ -222,8 +223,11 @@ Take the verbatim claim list from step 3.1. Every claim gets a row:
 Three rules:
 
 - **Evidence is a pointer into the paper.** "The authors state that…" is the
-  claim restated, not evidence for it. `note.py validate` rejects an evidence
-  field that names no figure, table, section or page.
+  claim restated, not evidence for it. When you have the full text, `note.py
+  validate` rejects an evidence field that names no figure, table, section or
+  page. Supplementary citations count and are expected — `Fig. S3`, `Table S1`.
+  On an `abstract-only` note the demand is dropped, because there is nothing
+  to point at.
 - **A claim with no evidence anywhere is a finding, not a blank.** Set
   `evidence` to null and say so in `issue` — "asserted in the abstract and the
   discussion; no experiment in the paper measures it". That row is often the
@@ -269,13 +273,26 @@ A verdict of `skip` on a well-executed paper is a legitimate outcome; so is
 Write the note as JSON. `python3 scripts/note.py template` prints the shape;
 `references/note-schema.md` explains each field.
 
+**Plain text, no Markdown.** The note carries text; emphasis is the renderer's
+job. `**bold**`, backticks, `#` headings, `-` bullets, links and HTML tags are
+all rejected — Word renders them as literal characters. A blank line starts a
+new paragraph, and list items go in the fields that are already lists
+(`next_steps`, `limitations.*`, `authors`). The check reads the whole note, so
+it covers `paper.venue` and `paper.url` too. Statistical significance is not
+markup and is not rejected: write `(***, p < 0.001)` as you would in a paper.
+
+**Write lists as lists.** `"next_steps": "watch for a code release"` is a
+string, not a list of one, and it used to render as a numbered list with one
+character per item. Validation now rejects it; the fix is `[...]`.
+
 ```bash
 python3 scripts/note.py validate /tmp/note.json
 python3 scripts/note.py render /tmp/note.json -o /tmp/note.md
 ```
 
 Fix what validation reports rather than passing `--force`. Every check it makes
-corresponds to a way a note reads as more grounded than it is.
+corresponds to a way a note reads as more grounded than it is. `--force` still
+prints each error it overrode, so the output is never quietly incomplete.
 
 ### 8. Deliver as Word
 
@@ -326,14 +343,16 @@ usually becomes the first slide rather than the last.
 
 ## What the scripts guarantee, and what they do not
 
-**Guarantee.** A file that is actually a PDF, or an explicit statement that
-there is none. The right preprint server and version for a `10.1101/` DOI. A
-note whose claims name their evidence and whose empty sections are labelled as
-empty.
+**Guarantee.** A *downloaded* file that is actually a PDF, or an explicit
+statement that there is none. The right preprint server and version for a
+preprint DOI, whichever prefix it carries. A note whose claims name their
+evidence and whose empty sections are labelled as empty.
 
 **Do not.** Read, judge, summarise or write. Check that a figure reference is
 *correct* — validation checks that you cited something, not that you cited the
-right thing. Parse the PDF; you read it directly.
+right thing. Parse the PDF; you read it directly. Vouch for a local file: a
+path you pass in is reported as full text with a warning if it does not start
+with `%PDF-`, because you may have had a reason to point at it.
 
 ## Traps
 

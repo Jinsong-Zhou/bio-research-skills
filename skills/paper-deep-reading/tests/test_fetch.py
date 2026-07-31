@@ -26,12 +26,72 @@ class TestIdentifierParsing:
             ("https://arxiv.org/abs/2501.01234", "2501.01234"),
             ("https://arxiv.org/pdf/2501.01234v3", "2501.01234"),
             ("q-bio/0701001", "q-bio/0701001"),
+            ("math.AG/0701001", "math.AG/0701001"),
+            ("cond-mat.stat-mech/0701001", "cond-mat.stat-mech/0701001"),
+            ("https://doi.org/10.48550/arXiv.2501.01234", "2501.01234"),
         ],
     )
     def test_arxiv_forms_collapse_to_a_bare_id(self, given, expected):
         """Versions are stripped: v1 and v3 are the same paper, and the bare
         id always resolves to the latest."""
         assert fetch.parse_identifier(given) == ("arxiv", expected)
+
+    @pytest.mark.parametrize(
+        "given",
+        [
+            "10.3389/fnins.2013.00025",
+            "10.1371/journal.pone.0301234",
+            "10.7554/eLife.12345",
+        ],
+    )
+    def test_a_journal_doi_whose_tail_looks_like_an_arxiv_id_stays_a_doi(self, given):
+        """The bug this guards, and it was the worst one here.
+
+        ``10.3389/fnins.2013.00025`` is an ordinary Frontiers DOI whose tail
+        has exactly the arXiv shape. Matched with ``search`` rather than
+        ``fullmatch``, and tried before the DOI patterns, it became the arXiv
+        id ``2013.00025`` — so an open-access paper was reported as having no
+        full text, under a ``10.48550/arXiv.…`` DOI this script had invented
+        for it and offered to the agent to copy into the note.
+        """
+        assert fetch.parse_identifier(given) == ("doi", given)
+
+    def test_the_scripts_own_europe_pmc_landing_url_round_trips(self):
+        """``resolve_europepmc`` emits this shape, so feeding the script its
+        own output has to work. It used to parse as the arXiv id ``MED/…``."""
+        kind, value = fetch.parse_identifier("https://europepmc.org/article/MED/1234567")
+        assert (kind, value) == ("pmid", "1234567")
+
+    @pytest.mark.parametrize(
+        "given",
+        [
+            "https://pubmed.ncbi.nlm.nih.gov/34265844/",
+            "https://pubmed.ncbi.nlm.nih.gov/34265844",
+        ],
+    )
+    def test_a_pubmed_url_works_with_or_without_the_trailing_slash(self, given):
+        """The slash is what PubMed's own address bar and its Cite dialog
+        emit, and the PMC equivalent already accepted it."""
+        assert fetch.parse_identifier(given) == ("pmid", "34265844")
+
+    def test_a_query_string_does_not_become_part_of_the_doi(self):
+        """A preprint link copied out of a feed reader carries ``?rss=1``."""
+        kind, value = fetch.parse_identifier(
+            "https://www.biorxiv.org/content/10.1101/2024.01.15.575681v1?rss=1"
+        )
+        assert (kind, value) == ("doi", "10.1101/2024.01.15.575681")
+
+    @pytest.mark.parametrize(
+        "given",
+        ["1234567890", "Smith et al. 2024 Nature 12345678", "cond-mat/070100"],
+    )
+    def test_a_near_miss_is_refused_rather_than_silently_trimmed(self, given):
+        """``search`` discarded whatever did not fit and looked up the rest, so
+        a ten-digit number became a nine-digit PMID for a real, unrelated
+        paper. A reference we cannot read has to fail, not resolve to a guess.
+        """
+        with pytest.raises(fetch.ResolutionError):
+            fetch.parse_identifier(given)
 
     def test_a_remote_pdf_url_is_not_mistaken_for_a_local_file(self):
         """The bug this guards: a landing URL ending in .pdf has a .pdf suffix,

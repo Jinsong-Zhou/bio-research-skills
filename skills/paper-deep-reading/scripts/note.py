@@ -31,11 +31,18 @@ from typing import Any
 #: A reference into the paper: a figure, table, section, equation or page.
 #: Matched in English and Chinese because the note follows the user's language
 #: while these anchors usually stay in the paper's.
+#:
+#: The optional ``S``/``E`` before the number is not decoration: ``Fig. S3``
+#: and ``Table S1`` are how journals cite supplementary material, and SKILL.md
+#: step 3.6 sends the agent there specifically because that is where a paper's
+#: weakest point usually sits. Demanding a digit immediately after the keyword
+#: rejected the ordinary way of writing the citation.
 ANCHOR = re.compile(
     r"(?:"
-    r"Fig(?:ure)?\.?\s*\d|Tab(?:le)?\.?\s*\d|Sec(?:tion)?\.?\s*\d|Eq(?:uation)?\.?\s*\d"
+    r"Fig(?:ure)?s?\.?\s*[SE]?\d|Tab(?:le)?s?\.?\s*[SE]?\d"
+    r"|Sec(?:tion)?s?\.?\s*\d|Eq(?:uation)?s?\.?\s*\d"
     r"|pp?\.\s*\d|Appendix|Supplement(?:ary|al)?|Extended\s+Data"
-    r"|[图表]\s*\d|第\s*\d+\s*[节章页]|附录|补充材料|扩展数据"
+    r"|[图表]\s*[SE]?\d|第\s*\d+\s*[节章页]|附录|补充材料|扩展数据"
     r")",
     re.IGNORECASE,
 )
@@ -44,6 +51,29 @@ DECISIONS = ("follow-up", "watch", "skip")
 CONFIDENCES = ("high", "medium", "low")
 RELEVANCE_STATES = ("written", "no-background-provided")
 FULLTEXT_STATES = ("full", "abstract-only")
+
+#: Languages with a heading table. Validated rather than defaulted silently:
+#: ``STRINGS.get(lang, STRINGS["en"])`` means ``"zh-CN"`` renders an entirely
+#: English scaffold around Chinese content, and nothing says so.
+LANGUAGES = ("en", "zh")
+
+#: Every shape ``build_blocks`` may emit. Named once here because four places
+#: used to carry their own copy of the list — this docstring, SKILL.md step 8,
+#: ``references/note-schema.md`` and the test suite — and a renderer that
+#: silently drops an unknown type is the failure they were meant to prevent.
+BLOCK_TYPES = (
+    "title",
+    "banner",
+    "h1",
+    "h2",
+    "p",
+    "note",
+    "label",
+    "fields",
+    "bullets",
+    "numbered",
+    "table",
+)
 
 #: What kind of paper this is. It decides how ``pipeline`` decomposes — a
 #: model has training and inference, a cryo-EM structure has sample prep and
@@ -110,6 +140,38 @@ def _blank(value: Any) -> bool:
     return value is None or (isinstance(value, (str, list, dict)) and not value)
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    """``value`` if it is a mapping, an empty one otherwise.
+
+    Validation reports a section written as the wrong shape; it must not die
+    on it. A tool whose job is to say what is wrong with a note is worth
+    nothing if a malformed note gives it a traceback instead of a report.
+    """
+    return value if isinstance(value, dict) else {}
+
+
+def _string_list_errors(value: Any, where: str) -> list[str]:
+    """Reject a string written where a list belongs.
+
+    ``list("watch for a code release")`` is legal Python, so an unchecked
+    string reaches the renderer and comes out one character per item. The note
+    is authored as JSON by hand, which makes this the likeliest mistake in it,
+    and until now it was one of the few that validation waved through.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return [
+            f"{where} must be a list of strings, not {type(value).__name__} — "
+            "a string here renders one character per item"
+        ]
+    return [
+        f"{where}[{i}] must be a string, not {type(item).__name__}"
+        for i, item in enumerate(value)
+        if not isinstance(item, str)
+    ]
+
+
 def _depth(text: str) -> int:
     """Weighted length: CJK characters count double.
 
@@ -129,9 +191,22 @@ def validate(note: dict[str, Any]) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
-    paper = note.get("paper") or {}
+    for key in ("paper", "understanding", "assessment", "relevance"):
+        section = note.get(key)
+        if section is not None and not isinstance(section, dict):
+            errors.append(f"{key} must be an object, not {type(section).__name__}")
+
+    language = note.get("language") or "en"
+    if language not in LANGUAGES:
+        errors.append(
+            f"language must be one of {LANGUAGES}, got {language!r} — an unrecognised "
+            "value renders English headings over the note's own language without saying so"
+        )
+
+    paper = _mapping(note.get("paper"))
     if _blank(paper.get("title")):
         errors.append("paper.title is empty")
+    errors.extend(_string_list_errors(paper.get("authors"), "paper.authors"))
     if paper.get("type") not in PAPER_TYPES:
         errors.append(
             f"paper.type must be one of {PAPER_TYPES}, got {paper.get('type')!r} — "
@@ -146,13 +221,20 @@ def validate(note: dict[str, Any]) -> tuple[list[str], list[str]]:
             "in figures or methods, and the document will say so"
         )
 
-    understanding = note.get("understanding") or {}
+    understanding = _mapping(note.get("understanding"))
     for field in UNDERSTANDING_FIELDS:
-        if _blank(understanding.get(field)):
+        value = understanding.get(field)
+        if _blank(value):
             errors.append(f"understanding.{field} is empty")
+        elif not isinstance(value, str):
+            errors.append(
+                f"understanding.{field} must be a string, not {type(value).__name__} — "
+                "use a blank line for a new paragraph"
+            )
 
     for field in DEPTH_FIELDS:
-        text = str(understanding.get(field) or "")
+        text = understanding.get(field)
+        text = text if isinstance(text, str) else ""
         if text and _depth(text) < MIN_DEPTH:
             warnings.append(
                 f"understanding.{field} is {_depth(text)} weighted characters, under "
@@ -160,27 +242,48 @@ def validate(note: dict[str, Any]) -> tuple[list[str], list[str]]:
                 "hard, not just what it is"
             )
 
-    findings = understanding.get("findings") or ""
+    findings = understanding.get("findings")
+    findings = findings if isinstance(findings, str) else ""
     if findings and not ANCHOR.search(findings):
         warnings.append(
             "understanding.findings cites no figure, table or section — results "
             "described without a pointer are hard to check later"
         )
 
-    errors.extend(_validate_assessment(note.get("assessment") or {}, fulltext))
-    errors.extend(_validate_relevance(note.get("relevance") or {}))
+    errors.extend(_validate_assessment(_mapping(note.get("assessment")), fulltext))
+    errors.extend(_validate_relevance(_mapping(note.get("relevance"))))
     errors.extend(_validate_no_markup(note))
     return errors, warnings
 
 
+#: Significance notation, cleared before the markup check runs. A run of
+#: asterisks that closes a parenthetical (``(**, p < 0.01)``, ``(***)``) or
+#: introduces a p-value (``***p < 0.001``) is how every experimental paper
+#: reports its statistics — flagging it as Markdown was flagging the domain.
+#:
+#: The lookbehind is what keeps real emphasis intact: the closing ``**`` of
+#: ``**doubled**`` follows a word character, so it is never cleared, and the
+#: pair still matches below. Matching balanced emphasis directly cannot work
+#: here — in ``(**, p<0.05) 与 (***, p<0.001)`` a paired pattern bridges the
+#: two runs and reports the text between them as bold.
+_SIGNIFICANCE = re.compile(
+    r"(?<![^\s(\[{])\*{1,4}(?=\s*(?:[,;)\]]|p\s*[<>=≤≥]|$))",
+    re.IGNORECASE,
+)
+
 #: Markdown that shows up as literal characters in Word. Emphasis is the
 #: renderer's job; the note carries text.
 _MARKUP = (
-    (re.compile(r"\*\*|__"), "bold markers (** or __)"),
+    # Paired delimiters only — a bare run of asterisks is statistics, not bold.
+    (re.compile(r"\*\*(?=[^\s*])[^*]+\*\*"), "bold markers (**…**)"),
+    (re.compile(r"(?<!\w)__(?=[^\s_])[^_]+__(?!\w)"), "bold markers (__…__)"),
     (re.compile(r"`"), "backticks"),
     (re.compile(r"^\s*#{1,6}\s", re.MULTILINE), "a Markdown heading"),
     (re.compile(r"^\s*>\s", re.MULTILINE), "a blockquote marker"),
     (re.compile(r"^\s*[-*+]\s", re.MULTILINE), "a bullet marker"),
+    (re.compile(r"\[[^\]\n]+\]\([^)\n]+\)"), "a Markdown link"),
+    (re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE), "a Markdown table row"),
+    (re.compile(r"</?[A-Za-z][A-Za-z0-9]*\s*/?>"), "an HTML tag"),
 )
 
 
@@ -204,6 +307,7 @@ def _validate_no_markup(note: dict[str, Any]) -> list[str]:
     """
     errors = []
     for path, text in _walk_text(note):
+        text = _SIGNIFICANCE.sub("", text)
         for pattern, what in _MARKUP:
             if pattern.search(text):
                 errors.append(
@@ -225,7 +329,7 @@ def _validate_assessment(assessment: dict[str, Any], fulltext: Any) -> list[str]
         for i, claim in enumerate(claims):
             errors.extend(_validate_claim(i, claim, fulltext))
 
-    verdict = assessment.get("verdict") or {}
+    verdict = _mapping(assessment.get("verdict"))
     decision = verdict.get("decision")
     if decision not in DECISIONS:
         errors.append(f"assessment.verdict.decision must be one of {DECISIONS}, got {decision!r}")
@@ -233,11 +337,15 @@ def _validate_assessment(assessment: dict[str, Any], fulltext: Any) -> list[str]
         errors.append(
             "assessment.verdict.reasoning is empty — a verdict without one is a coin flip"
         )
+    errors.extend(_string_list_errors(verdict.get("next_steps"), "assessment.verdict.next_steps"))
 
-    limitations = assessment.get("limitations") or {}
+    limitations = _mapping(assessment.get("limitations"))
     for key in ("acknowledged", "unstated"):
-        if not isinstance(limitations.get(key), list):
+        value = limitations.get(key)
+        if not isinstance(value, list):
             errors.append(f"assessment.limitations.{key} must be a list")
+        else:
+            errors.extend(_string_list_errors(value, f"assessment.limitations.{key}"))
 
     return errors
 
@@ -379,6 +487,21 @@ def _text(value: Any, fallback: str = "") -> str:
     return text or fallback
 
 
+def _as_list(value: Any) -> list[str]:
+    """Coerce a rendered list field without exploding a string into characters.
+
+    ``list("watch for a release")`` is what the renderer used to do with a
+    string written where a list belongs — twenty-odd items, one character
+    each. Validation now rejects that shape; this keeps ``--force`` from
+    turning the same mistake into a corrupted document.
+    """
+    if _blank(value):
+        return []
+    if not isinstance(value, list):
+        return [_text(value)]
+    return [_text(item) for item in value if not _blank(item)]
+
+
 def paragraphs(value: Any) -> list[str]:
     """Split a field into paragraphs on blank lines.
 
@@ -398,24 +521,25 @@ def build_blocks(note: dict[str, Any]) -> list[dict[str, Any]]:
     would mean parsing a table back out of pipe characters, and handing them
     the raw note would mean reimplementing the heading translations in every
     language they are written in. Blocks carry the resolved labels, so a
-    renderer only has to know ten shapes.
+    renderer only has to know the eleven shapes in ``BLOCK_TYPES``.
 
-    Types: ``title`` ``banner`` ``h1`` ``h2`` ``p`` ``note`` ``label``
-    ``fields`` ``bullets`` ``numbered`` ``table``.
+    Every value is coerced rather than trusted, because ``--force`` routes a
+    note validation has already rejected through here: a malformed section has
+    to render as visibly wrong, not as a traceback.
     """
-    lang = note.get("language", "en")
-    s = STRINGS.get(lang, STRINGS["en"])
-    paper = note.get("paper") or {}
+    lang = note.get("language") or "en"
+    s = STRINGS.get(lang, STRINGS["en"]) if isinstance(lang, str) else STRINGS["en"]
+    paper = _mapping(note.get("paper"))
 
     blocks: list[dict[str, Any]] = [
-        {"type": "title", "text": s["title"].format(title=paper.get("title", ""))}
+        {"type": "title", "text": s["title"].format(title=_text(paper.get("title")))}
     ]
     if paper.get("fulltext") == "abstract-only":
         blocks.append({"type": "banner", "lead": s["banner_lead"], "text": s["banner_body"]})
 
     blocks.append({"type": "h1", "text": s["paper"]})
     fields: list[dict[str, str]] = []
-    authors = paper.get("authors") or []
+    authors = _as_list(paper.get("authors"))
     if authors:
         shown = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
         fields.append({"label": s["authors"], "value": shown})
@@ -428,7 +552,7 @@ def build_blocks(note: dict[str, Any]) -> list[dict[str, Any]]:
     if fields:
         blocks.append({"type": "fields", "items": fields})
 
-    understanding = note.get("understanding") or {}
+    understanding = _mapping(note.get("understanding"))
     blocks.append({"type": "h1", "text": s["part1"]})
     for field in UNDERSTANDING_FIELDS:
         blocks.append({"type": "h2", "text": s[field]})
@@ -438,8 +562,8 @@ def build_blocks(note: dict[str, Any]) -> list[dict[str, Any]]:
         # run-on wall of text.
         blocks += [{"type": "p", "text": para} for para in paragraphs(understanding.get(field))]
 
-    blocks += _assessment_blocks(note.get("assessment") or {}, s)
-    blocks += _relevance_blocks(note.get("relevance") or {}, s)
+    blocks += _assessment_blocks(_mapping(note.get("assessment")), s)
+    blocks += _relevance_blocks(_mapping(note.get("relevance")), s)
     return blocks
 
 
@@ -450,8 +574,12 @@ def _assessment_blocks(assessment: dict[str, Any], s: dict[str, str]) -> list[di
     ]
 
     rows = []
-    for claim in assessment.get("claims") or []:
-        confidence = claim.get("confidence", "")
+    raw_claims = assessment.get("claims")
+    for entry in raw_claims if isinstance(raw_claims, list) else []:
+        # A claim written as a bare string is rejected by validation; under
+        # --force it still has to reach the table, as its own row.
+        claim = entry if isinstance(entry, dict) else {"claim": _text(entry)}
+        confidence = _text(claim.get("confidence"))
         rows.append(
             [
                 _text(claim.get("claim"), "—"),
@@ -468,14 +596,14 @@ def _assessment_blocks(assessment: dict[str, Any], s: dict[str, str]) -> list[di
         }
     )
 
-    limitations = assessment.get("limitations") or {}
+    limitations = _mapping(assessment.get("limitations"))
     blocks.append({"type": "h2", "text": s["limitations"]})
     for label, key in ((s["acknowledged"], "acknowledged"), (s["unstated"], "unstated")):
         blocks.append({"type": "label", "text": label})
-        blocks.append({"type": "bullets", "items": list(limitations.get(key) or []) or ["—"]})
+        blocks.append({"type": "bullets", "items": _as_list(limitations.get(key)) or ["—"]})
 
-    verdict = assessment.get("verdict") or {}
-    decision = verdict.get("decision", "")
+    verdict = _mapping(assessment.get("verdict"))
+    decision = _text(verdict.get("decision"))
     blocks.append({"type": "h2", "text": s["verdict"]})
     blocks.append(
         {
@@ -488,9 +616,10 @@ def _assessment_blocks(assessment: dict[str, Any], s: dict[str, str]) -> list[di
         # A labelled paragraph, not a one-item ``fields`` list — a lone bullet
         # under the verdict reads as a list that lost its other entries.
         blocks.append({"type": "p", "lead": s["cost"], "text": _text(verdict["cost"])})
-    if verdict.get("next_steps"):
+    next_steps = _as_list(verdict.get("next_steps"))
+    if next_steps:
         blocks.append({"type": "label", "text": s["next_steps"]})
-        blocks.append({"type": "numbered", "items": list(verdict["next_steps"])})
+        blocks.append({"type": "numbered", "items": next_steps})
     return blocks
 
 
@@ -548,6 +677,13 @@ def render_markdown(note: dict[str, Any]) -> str:
             for row in block["rows"]:
                 lines.append("| " + " | ".join(_md_cell(c) for c in row) + " |")
             lines.append("")
+        else:
+            # Without this, a block type added to build_blocks and forgotten
+            # here vanishes from the Markdown with no error, no warning and a
+            # zero exit — the two renderings silently disagree about what the
+            # document contains. The external Word renderer is exposed to the
+            # same drift; here at least it is loud.
+            raise NoteError(f"unhandled block type {kind!r} — render_markdown is out of step")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -559,7 +695,9 @@ def render_markdown(note: dict[str, Any]) -> str:
 def load(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError, not an OSError: a note saved as
+        # UTF-16 or latin-1 used to come out as a raw traceback.
         raise NoteError(f"cannot read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise NoteError(f"{path} is not a JSON object")
@@ -595,7 +733,7 @@ def build_parser() -> argparse.ArgumentParser:
     render_cmd.add_argument(
         "--force",
         action="store_true",
-        help="render even if validation fails (the gaps stay visible in the output)",
+        help="render even if validation fails; every error is still reported on stderr",
     )
     return parser
 
@@ -627,10 +765,25 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     _report([], warnings)
-    if args.format == "blocks":
-        rendered = json.dumps(build_blocks(note), ensure_ascii=False, indent=2) + "\n"
-    else:
-        rendered = render_markdown(note)
+    if errors:
+        # --force overrides the errors; it does not get to hide them. A note
+        # rendered past a rejected claim or an empty section reads as finished,
+        # and the empty section is a heading the reader skims straight past.
+        for error in errors:
+            print(f"overridden: {error}", file=sys.stderr)
+        print(
+            f"--force: rendered with {len(errors)} unfixed error(s) listed above",
+            file=sys.stderr,
+        )
+
+    try:
+        if args.format == "blocks":
+            rendered = json.dumps(build_blocks(note), ensure_ascii=False, indent=2) + "\n"
+        else:
+            rendered = render_markdown(note)
+    except NoteError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

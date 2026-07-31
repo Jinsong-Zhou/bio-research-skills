@@ -11,9 +11,30 @@ way the reader cannot detect.
 
 ## Top level
 
+Two rules run across every field, so they are stated once here rather than
+repeated in each table below.
+
+**Plain text, no Markdown.** `**bold**`, `__bold__`, backticks, `#` headings,
+`>` quotes, `-` bullets, `[links](…)`, pipe tables and HTML tags are all
+rejected as errors. Markdown renders them; Word prints them verbatim, and both
+come from this one note. A blank line starts a new paragraph — that is the
+only structure the fields carry. The check walks the whole note, `paper.venue`
+and `paper.url` included, so a venue copied out of `fetch.py`'s metadata with
+a leading `- ` fails too.
+
+Statistical significance is **not** markup. `(***, p < 0.001)`, `(**)` and
+`***p < 0.001` are cleared before the check runs, because that is how a paper
+reports its statistics and rejecting it would be rejecting the domain.
+
+**Lists are lists.** `"next_steps": "watch for a release"` is a string.
+`list()` of it is twenty-odd items, one character each, and that is what
+reached the Word document before validation checked the type. The fields that
+must be lists of strings: `paper.authors`, `assessment.verdict.next_steps`,
+`assessment.limitations.acknowledged`, `assessment.limitations.unstated`.
+
 | field | type | notes |
 |---|---|---|
-| `language` | `"en"` \| `"zh"` | Which language the note is written in. Controls the rendered headings only — the content is yours. Defaults to `en` if absent. |
+| `language` | `"en"` \| `"zh"` | Which language the note is written in. Controls the rendered headings only — the content is yours. Defaults to `en` if absent; any other value is an error, because an unrecognised one renders English headings over Chinese content without saying so. |
 | `paper` | object | Bibliographic identity |
 | `understanding` | object | Part 1 — what the paper does |
 | `assessment` | object | Part 2 — whether it holds up |
@@ -62,14 +83,14 @@ Two soft checks, both warnings rather than errors:
 | field | required | notes |
 |---|---|---|
 | `claim` | ✅ | The authors' claim at the authors' scope. Do not soften it; the scope is part of what is being audited. |
-| `evidence` | | Where in the paper it is supported: `"Table 2"`, `"Fig. 3b"`, `"Sec. 4.1"`, `"Supplementary Fig. 7"`. Must name a figure, table, section, equation, page or appendix when `paper.fulltext` is `"full"`. |
+| `evidence` | | Where in the paper it is supported: `"Table 2"`, `"Fig. 3b"`, `"Sec. 4.1"`, `"Fig. S3"`, `"Supplementary Fig. 7"`. Must name a figure, table, section, equation, page or appendix when `paper.fulltext` is `"full"`. Supplementary forms count — `Fig. S3`, `Table S1`, `Figs. 2 and 3` — since that is where the load-bearing controls usually live. |
 | `confidence` | ✅ | `"high"` \| `"medium"` \| `"low"` — how well *that evidence* supports *that claim*. Not how much you like the paper. |
 | `issue` | | What is wrong or missing. Required when `evidence` is empty. |
 
 **`evidence: null` is a legitimate and often important row.** A claim the paper
 asserts but never measures is a finding. Set `evidence` to null and explain in
 `issue`: `"asserted in the abstract and discussion; no experiment measures it"`.
-Leaving both empty is the one thing validation rejects outright.
+Leaving both empty is what validation rejects outright.
 
 ### `limitations`
 
@@ -131,10 +152,16 @@ resolved, so eleven shapes cover the whole document:
 | `numbered` | `items[]` | ordered list |
 | `table` | `header[]`, `rows[][]` | the claim table |
 
+The list lives in code as `note.BLOCK_TYPES`, and `render_markdown` raises on
+a type it does not handle — a shape added to `build_blocks` and forgotten in
+one renderer would otherwise vanish from that rendering with no error and a
+zero exit.
+
 **Blocks carry no markup.** No `**bold**`, no `> quote`, no `_italic_` — the
-emphasis is in the block type, and each renderer applies its own. A block whose
-text contains Markdown syntax is a bug in `build_blocks`, not something for the
-renderer to strip.
+emphasis is in the block type, and each renderer applies its own. `build_blocks`
+passes text through untouched, so markup in a block means markup in the *note*;
+`validate` rejects that before rendering, and a renderer should never have to
+strip it.
 
 Empty lists still render: `bullets` with no items becomes `["—"]`, so an empty
 limitations section is visibly empty rather than absent.

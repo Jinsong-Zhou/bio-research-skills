@@ -80,9 +80,9 @@ assessment asks where each claim is actually supported, and the interesting
 rows are the ones where the answer is *nowhere*. So the note is structured
 rather than prose: every claim gets a row naming the figure, table or section
 that backs it, and a claim with no such pointer has to be recorded as having
-none. Validation enforces that — it cannot tell whether `Table 2` is the
-*right* table, but it will not let a claim through with "the authors state
-that…" in the evidence column.
+none. Validation enforces that whenever the full text was available — it cannot
+tell whether `Table 2` is the *right* table, but it will not let a claim through
+with "the authors state that…" in the evidence column.
 
 Reading order is part of the skill, not an afterthought. Figures before the
 prose that interprets them, methods held to the single question of how those

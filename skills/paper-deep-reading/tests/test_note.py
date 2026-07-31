@@ -106,6 +106,18 @@ class TestValidationAccepts:
     def test_anchors_are_recognised_in_both_languages(self, evidence):
         assert not errors_for(lambda d: d["assessment"]["claims"][0].update(evidence=evidence))
 
+    @pytest.mark.parametrize(
+        "evidence",
+        ["Fig. S3", "Table S1", "figure S2", "Figs. 2 and 3", "Tables S1-S3", "图 S3"],
+    )
+    def test_supplementary_citations_are_anchors_too(self, evidence):
+        """``Fig. S3`` is how journals cite supplementary material, and
+        SKILL.md step 3.6 sends the agent there because that is where a
+        paper's weakest point usually sits. Demanding a digit immediately
+        after the keyword rejected the ordinary way of writing it, leaving the
+        agent to reword a correct citation or pass --force."""
+        assert not errors_for(lambda d: d["assessment"]["claims"][0].update(evidence=evidence))
+
 
 class TestValidationRefuses:
     @pytest.mark.parametrize("field", note.UNDERSTANDING_FIELDS)
@@ -152,6 +164,86 @@ class TestValidationRefuses:
         produces a section describing a paper nobody wrote."""
         errors = errors_for(lambda d: d["paper"].update(type=kind))
         assert any("paper.type" in e for e in errors)
+
+    def test_an_empty_title(self):
+        assert any("paper.title" in e for e in errors_for(lambda d: d["paper"].update(title="")))
+
+    def test_an_empty_claim(self):
+        errors = errors_for(lambda d: d["assessment"]["claims"][0].update(claim=""))
+        assert any("claims[0].claim is empty" in e for e in errors)
+
+    @pytest.mark.parametrize("confidence", ["quite sure", "", None, "High"])
+    def test_a_confidence_outside_the_three(self, confidence):
+        errors = errors_for(lambda d: d["assessment"]["claims"][0].update(confidence=confidence))
+        assert any("claims[0].confidence" in e for e in errors)
+
+    def test_a_claim_written_as_a_bare_string(self):
+        errors = errors_for(lambda d: d["assessment"].update(claims=["Table 2 shows it"]))
+        assert any("claims[0] must be an object" in e for e in errors)
+
+    @pytest.mark.parametrize("value", ["none", None, {"a": 1}])
+    def test_a_limitations_field_that_is_not_a_list(self, value):
+        errors = errors_for(lambda d: d["assessment"]["limitations"].update(unstated=value))
+        assert any("limitations.unstated must be a list" in e for e in errors)
+
+    @pytest.mark.parametrize("status", ["pending", "", None, "Written"])
+    def test_a_relevance_status_outside_the_two(self, status):
+        errors = errors_for(lambda d: d["relevance"].update(status=status))
+        assert any("relevance.status" in e for e in errors)
+
+
+class TestTypeConfusion:
+    """A string where a list belongs is the likeliest mistake in a note an
+    agent writes by hand, and it used to be one the validator waved through
+    into the Word document."""
+
+    def test_authors_written_as_a_string(self):
+        errors = errors_for(lambda d: d["paper"].update(authors="Zhou J, Li M"))
+        assert any("paper.authors must be a list" in e for e in errors)
+
+    def test_next_steps_written_as_a_string(self):
+        """``list("watch for a release")`` is legal Python: this rendered as a
+        twenty-item numbered list, one character per item."""
+        errors = errors_for(
+            lambda d: d["assessment"]["verdict"].update(next_steps="watch for a release")
+        )
+        assert any("next_steps must be a list" in e for e in errors)
+
+    def test_a_list_holding_something_that_is_not_a_string(self):
+        errors = errors_for(lambda d: d["paper"].update(authors=["A. One", {"name": "B"}]))
+        assert any("paper.authors[1] must be a string" in e for e in errors)
+
+    def test_an_understanding_field_written_as_a_list(self):
+        """It rendered the Python repr — brackets, quotes and all — into the
+        document, because ``str()`` never fails."""
+        errors = errors_for(lambda d: d["understanding"].update(problem=["first", "second"]))
+        assert any("understanding.problem must be a string" in e for e in errors)
+
+    @pytest.mark.parametrize("section", ["paper", "understanding", "assessment", "relevance"])
+    def test_a_whole_section_written_as_the_wrong_shape(self, section):
+        errors = errors_for(lambda d: d.update({section: ["a list"]}))
+        assert any(f"{section} must be an object" in e for e in errors)
+
+
+class TestLanguage:
+    @pytest.mark.parametrize("language", ["zh-CN", "中文", "ZH", "Chinese"])
+    def test_a_language_outside_the_table_is_rejected(self, language):
+        """``STRINGS.get(lang, STRINGS["en"])`` means an unrecognised value
+        renders an entirely English scaffold around Chinese content, and
+        nothing says so. It was the only vocabulary never validated."""
+        errors = errors_for(lambda d: d.update(language=language))
+        assert any("language must be one of" in e for e in errors)
+
+    def test_an_absent_language_defaults_to_english(self):
+        data = valid_note()
+        del data["language"]
+        assert note.validate(data)[0] == []
+        assert "## Part 1" in note.render_markdown(data)
+
+    def test_both_heading_tables_carry_the_same_keys(self):
+        """A key added to one and not the other is a KeyError at render time,
+        in whichever language nobody tested."""
+        assert note.STRINGS["en"].keys() == note.STRINGS["zh"].keys()
 
 
 class TestDepthFloor:
@@ -304,11 +396,41 @@ class TestNoMarkupInTheNote:
             ("# A heading\nthen text", "heading"),
             ("> a quotation\nthen text", "blockquote"),
             ("- first item\n- second item", "bullets"),
+            ("see [the repo](https://example.invalid)", "a link"),
+            ("| a | b |\n|---|---|\n| 1 | 2 |", "a pipe table"),
+            ("the <b>key</b> step", "an HTML tag"),
         ],
     )
     def test_markup_anywhere_is_rejected(self, text, what):
         errors = errors_for(lambda d: d["understanding"].update(problem=text))
         assert any("understanding.problem" in e for e in errors), what
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "升高约两倍 (***, p < 0.001)，但 n = 3。",
+            "与对照相比显著 (**, p<0.01) 而处理组 (***, p<0.001) 更强。",
+            "***p < 0.001, **p < 0.01, *p < 0.05 (Fig. 2c)",
+            "效应在处理组消失 (**)。",
+            "两组差异见 Fig. 2c。\n***p < 0.001, **p < 0.01",
+        ],
+    )
+    def test_significance_stars_are_statistics_not_bold(self, text):
+        """Every experimental paper reports its p-values this way. Treating a
+        bare run of asterisks as Markdown meant rejecting the domain — and the
+        agent's only escape was to reword a correct result or pass --force.
+
+        Matching balanced emphasis directly cannot fix this: in the second
+        case a paired pattern bridges the two runs and calls the text between
+        them bold. The runs are cleared first instead."""
+        assert errors_for(lambda d: d["understanding"].update(problem=text)) == []
+
+    @pytest.mark.parametrize("text", ["效应量 **翻倍** 了", "the **key** step", "a __key__ step"])
+    def test_real_emphasis_is_still_rejected(self, text):
+        """The significance carve-out must not open a hole: paired delimiters
+        around text are still Markdown and still reach Word verbatim."""
+        errors = errors_for(lambda d: d["understanding"].update(problem=text))
+        assert any("bold markers" in e for e in errors)
 
     def test_it_reaches_nested_text(self):
         errors = errors_for(lambda d: d["assessment"]["claims"][0].update(issue="**no rescue**"))
@@ -356,14 +478,31 @@ class TestBlocks:
     """The renderer-agnostic form. Markdown is rendered *from* these, so a
     Markdown assertion elsewhere does not cover what a Word renderer sees."""
 
-    KNOWN = {
-        "title", "banner", "h1", "h2", "p", "note", "label",
-        "fields", "bullets", "numbered", "table",
-    }
-
     def test_every_block_has_a_known_type(self):
-        types = {b["type"] for b in note.build_blocks(valid_note())}
-        assert types <= self.KNOWN, f"unknown block types: {types - self.KNOWN}"
+        data = valid_note()
+        data["paper"]["fulltext"] = "abstract-only"
+        types = {b["type"] for b in note.build_blocks(data)}
+        known = set(note.BLOCK_TYPES)
+        assert types <= known, f"unknown block types: {types - known}"
+
+    def test_the_declared_vocabulary_is_the_one_actually_emitted(self):
+        """BLOCK_TYPES is what SKILL.md, note-schema.md and the external Word
+        renderer are all written against; a name in it that nothing emits is
+        as misleading as one missing from it."""
+        data = valid_note()
+        data["paper"]["fulltext"] = "abstract-only"
+        assert {b["type"] for b in note.build_blocks(data)} == set(note.BLOCK_TYPES)
+
+    def test_markdown_refuses_a_block_type_it_does_not_handle(self, monkeypatch):
+        """The dispatch had no else, so a type added to build_blocks and
+        forgotten here vanished from the Markdown with no error, no warning
+        and a zero exit — the two renderings silently disagreeing about what
+        the document contains."""
+        monkeypatch.setattr(
+            note, "build_blocks", lambda _: [{"type": "callout", "text": "vanishes"}]
+        )
+        with pytest.raises(note.NoteError, match="unhandled block type"):
+            note.render_markdown(valid_note())
 
     def test_blocks_carry_no_markdown_markup(self):
         """Emphasis is the block type's job. Markup here would reach Word
@@ -425,14 +564,66 @@ class TestCli:
         assert note.main(["render", str(path)]) == 1
         assert "refusing to render" in capsys.readouterr().err
 
-    def test_force_renders_anyway(self, tmp_path):
+    def test_force_renders_anyway_and_writes_the_file(self, tmp_path):
         import json
 
         broken = valid_note()
         broken["understanding"]["problem"] = ""
         path = tmp_path / "n.json"
         path.write_text(json.dumps(broken), encoding="utf-8")
+        out = tmp_path / "n.md"
+        assert note.main(["render", str(path), "--force", "-o", str(out)]) == 0
+        assert "Part 2" in out.read_text(encoding="utf-8")
+
+    def test_force_still_reports_every_error_it_overrides(self, tmp_path, capsys):
+        """The help text used to promise "the gaps stay visible in the output"
+        while _report([], warnings) dropped the errors on the floor: an empty
+        section rendered as a bare heading the reader skims past, and the exit
+        code was 0."""
+        import json
+
+        broken = valid_note()
+        broken["understanding"]["mechanism"] = ""
+        broken["paper"]["type"] = "bogus"
+        path = tmp_path / "n.json"
+        path.write_text(json.dumps(broken), encoding="utf-8")
         assert note.main(["render", str(path), "--force", "-o", str(tmp_path / "n.md")]) == 0
+        err = capsys.readouterr().err
+        assert "overridden: understanding.mechanism is empty" in err
+        assert "overridden: paper.type" in err
+        assert "2 unfixed error(s)" in err
+
+    def test_force_renders_a_malformed_note_instead_of_crashing(self, tmp_path):
+        """--force is the mode most likely to be handed a note of the wrong
+        shape, and it was the one that died on it."""
+        import json
+
+        path = tmp_path / "n.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "paper": {"title": "T", "type": "theory", "fulltext": "full"},
+                    "assessment": {
+                        "claims": ["a bare string claim"],
+                        "verdict": {"decision": "skip", "reasoning": "r", "next_steps": "one step"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = tmp_path / "n.md"
+        assert note.main(["render", str(path), "--force", "-o", str(out)]) == 0
+        rendered = out.read_text(encoding="utf-8")
+        assert "a bare string claim" in rendered
+        assert "1. one step" in rendered, "a string must not explode into one item per character"
+
+    def test_validate_reports_a_malformed_note_instead_of_crashing(self, tmp_path, capsys):
+        import json
+
+        path = tmp_path / "n.json"
+        path.write_text(json.dumps({"paper": "A paper", "understanding": ["problem"]}), "utf-8")
+        assert note.main(["validate", str(path)]) == 1
+        assert "must be an object" in capsys.readouterr().err
 
     def test_validate_exits_nonzero_on_errors(self, tmp_path):
         import json
@@ -441,8 +632,45 @@ class TestCli:
         path.write_text(json.dumps(note.TEMPLATE), encoding="utf-8")
         assert note.main(["validate", str(path)]) == 1
 
+    def test_validate_says_ok_and_exits_zero_on_a_clean_note(self, tmp_path, capsys):
+        import json
+
+        path = tmp_path / "n.json"
+        path.write_text(json.dumps(valid_note()), encoding="utf-8")
+        assert note.main(["validate", str(path)]) == 0
+        assert "ok" in capsys.readouterr().err
+
+    def test_blocks_format_emits_json_not_markdown(self, tmp_path, capsys):
+        import json
+
+        path = tmp_path / "n.json"
+        path.write_text(json.dumps(valid_note()), encoding="utf-8")
+        assert note.main(["render", str(path), "--format", "blocks"]) == 0
+        blocks = json.loads(capsys.readouterr().out)
+        assert blocks[0]["type"] == "title"
+
+    def test_template_prints_a_note_that_does_not_yet_validate(self, capsys):
+        import json
+
+        assert note.main(["template"]) == 0
+        assert note.validate(json.loads(capsys.readouterr().out))[0]
+
     def test_a_file_that_is_not_json_fails_with_a_message(self, tmp_path, capsys):
         path = tmp_path / "n.json"
         path.write_text("not json", encoding="utf-8")
+        assert note.main(["validate", str(path)]) == 2
+        assert "cannot read" in capsys.readouterr().err
+
+    def test_a_top_level_json_array_is_not_a_note(self, tmp_path, capsys):
+        path = tmp_path / "n.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert note.main(["validate", str(path)]) == 2
+        assert "not a JSON object" in capsys.readouterr().err
+
+    def test_a_note_saved_in_another_encoding_fails_with_a_message(self, tmp_path, capsys):
+        """UnicodeDecodeError is a ValueError, not an OSError, so a note saved
+        as UTF-16 used to come out as a raw traceback."""
+        path = tmp_path / "n.json"
+        path.write_bytes('{"language": "zh"}'.encode("utf-16"))
         assert note.main(["validate", str(path)]) == 2
         assert "cannot read" in capsys.readouterr().err
