@@ -16,7 +16,7 @@ npx skills add Jinsong-Zhou/bio-research-skills
 | Skill | What it lifts off your plate | Status |
 |---|---|---|
 | [`literature-tracking`](skills/literature-tracking/) | Three disconnected firehoses — arXiv q-bio, bioRxiv/medRxiv, PubMed. The same paper three times; alerts too broad or too narrow. | ✅ v0.1 |
-| `paper-deep-reading` | Triage dozens a week, deep-read a few — most turn out "meh". Notes never get written; group slides cost a late night. | 📋 planned |
+| [`paper-deep-reading`](skills/paper-deep-reading/) | One paper, read properly. Anything can summarise; knowing whether the conclusions actually hold is the work, and it is the part that never gets written down. | ✅ v0.1 |
 | `code-reproduction` | A GitHub link ≠ the paper's numbers: dependency drift, CUDA mismatches, missing weights, an afternoon lost. | 📋 planned |
 
 ### `literature-tracking`
@@ -61,6 +61,48 @@ It also refuses to fail silently. Each of these returns **HTTP 200**:
 Each has a guard, each is documented with measured evidence in
 [`references/source-quirks.md`](skills/literature-tracking/references/source-quirks.md).
 
+### `paper-deep-reading`
+
+Takes one paper — a PDF, an arXiv id, a DOI, a preprint link — and produces a
+Word document in two halves: what the paper does, then whether it holds up.
+
+The first half has to **teach**, not summarise. Five fields, each answering a
+question the one before it raises: what the problem is *and why it is hard*;
+the idea, mapped obstacle by obstacle onto that problem; what it concretely
+does, step by step; the mechanism that carries the result and where it stops
+working; then what came out. How the pipeline decomposes depends on what kind
+of paper it is — a model has training and inference, a cryo-EM structure has
+sample prep and reconstruction — so the type is chosen during the reading pass
+rather than assumed.
+
+The second half is where the value is. A summary restates the abstract; an
+assessment asks where each claim is actually supported, and the interesting
+rows are the ones where the answer is *nowhere*. So the note is structured
+rather than prose: every claim gets a row naming the figure, table or section
+that backs it, and a claim with no such pointer has to be recorded as having
+none. Validation enforces that whenever the full text was available — it cannot
+tell whether `Table 2` is the *right* table, but it will not let a claim through
+with "the authors state that…" in the evidence column.
+
+Reading order is part of the skill, not an afterthought. Figures before the
+prose that interprets them, methods held to the single question of how those
+numbers were produced, related work last — once you know what the paper did and
+can judge whether it is compared against the right things.
+
+[`references/credibility-checks.md`](skills/paper-deep-reading/references/credibility-checks.md)
+carries the checklist. It leads with the three checks that have no equivalent
+outside biology: **correlation presented as mechanism** (a knockdown without a
+rescue is one experiment short of causal), **the model system and its distance
+to the claim** (HEK293 is not a neuron, overexpression is itself a
+perturbation), and **the proxy versus the target** (mRNA is not protein,
+colocalisation is not interaction). For computational work, train/test homology
+leakage is the most common failure and the least often disclosed.
+
+It also refuses to pretend it has the paper. Paywalled articles with no
+open-access version are reported as such, with the abstract, and the document
+says on its first line that it was written without the full text — because an
+assessment built on an abstract is auditing the half that contains no evidence.
+
 ---
 
 ## Install
@@ -82,6 +124,33 @@ npx skills add Jinsong-Zhou/bio-research-skills -g
 npx skills add Jinsong-Zhou/bio-research-skills --all -y
 ```
 
+Nothing here needs a package installed or a credential configured. The bundled
+scripts are standard-library Python 3.9+.
+
+### Word and slide output
+
+`paper-deep-reading` delivers a `.docx`, and it does not write one itself — it
+hands the note to the [`docx` skill](https://github.com/anthropics/skills) from
+Anthropic's collection:
+
+```
+/plugin marketplace add anthropics/skills
+/plugin install document-skills@anthropic-agent-skills
+```
+
+That skill is **licensed separately** — © Anthropic, with terms running through
+your agreement with Anthropic — and needs Node.js plus the
+[`docx`](https://www.npmjs.com/package/docx) npm package, which is MIT and a
+separate thing. Neither is vendored here. Outside a Claude environment, check
+those terms before relying on it.
+
+What gets handed over is `note.py render --format blocks` — a typed document
+tree with the headings already in the note's language — not the Markdown. A
+renderer should not have to parse a table back out of pipe characters.
+
+Without the skill, `paper-deep-reading` renders the same note to Markdown and
+says why. Slides work the same way, from the same blocks, via `pptx`.
+
 ---
 
 ## Layout
@@ -93,10 +162,11 @@ skills/
     scripts/          # bundled tooling
     references/       # per-API notes, loaded on demand
     tests/
+  paper-deep-reading/
+    ...               # same shape
 ```
 
-`paper-deep-reading/` and `code-reproduction/` will sit alongside it; neither
-exists yet.
+`code-reproduction/` will sit alongside them; it does not exist yet.
 
 Each skill folder carries a `SKILL.md` with YAML frontmatter (`name`, `description`).
 Skills are self-contained: no shared runtime, install one without the others.
@@ -112,7 +182,11 @@ Skills are self-contained: no shared runtime, install one without the others.
 3. **Fail loudly.** Several literature APIs return HTTP 200 on error. Verify response
    structure, never the status code alone.
 4. **Local-first where it matters.** Unpublished lab data stays local.
-5. **Permissive licenses only.** No AGPL, no research-only weights, no unlicensed code.
+5. **Permissive licenses in, licences named out.** Code shipped in this
+   repository is MIT or compatible — no AGPL, no research-only weights, no
+   unlicensed code. External tools we *recommend* are a separate question:
+   they are named with their licence so you can decide for yourself. The `docx`
+   skill is the current example — proprietary, useful, and not vendored.
 
 ---
 
@@ -126,8 +200,9 @@ uv run ruff check .
 ```
 
 The `live` tests are the interesting ones: they assert that bioRxiv *still*
-ignores unknown categories and that arXiv *still* accepts structured queries.
-When upstream fixes something, those tests fail and tell us a guard can go.
+ignores unknown categories, that arXiv *still* accepts structured queries, and
+that preprint DOIs *still* come with the prefixes we route. When upstream
+changes something, those tests fail and say which guard needs a look.
 
 ## Acknowledgements
 
@@ -148,6 +223,11 @@ When upstream fixes something, those tests fail and tell us a guard can go.
   (AGPL-3.0) — studied for its recency-weighted profile ranking. **Ideas only;
   no code was copied or adapted**, since AGPL is incompatible with this
   repository's MIT license.
+- **[anthropics/skills](https://github.com/anthropics/skills)** (proprietary,
+  © Anthropic) — `paper-deep-reading` delegates Word and slide rendering to the
+  `docx` and `pptx` skills there rather than reimplementing either. No code is
+  copied; they are named as prerequisites and their terms are the user's to
+  accept. See the Install section.
 - **[K-Dense-AI/scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills)**
   (MIT) — the practice of documenting each API's silent-failure modes in
   per-source `references/` files is theirs, and it is a good one.
