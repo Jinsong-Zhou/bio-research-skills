@@ -66,12 +66,21 @@ Each has a guard, each is documented with measured evidence in
 Takes one paper — a PDF, an arXiv id, a DOI, a preprint link — and produces a
 Word document in two halves: what the paper does, then whether it holds up.
 
-The second half is the point. A summary restates the abstract; an assessment
-asks where each claim is actually supported, and the interesting rows are the
-ones where the answer is *nowhere*. So the note is structured rather than
-prose: every claim the paper makes gets a row naming the figure, table or
-section that backs it, and a claim with no such pointer has to be recorded as
-having none. Validation enforces that — it cannot tell whether `Table 2` is the
+The first half has to **teach**, not summarise. Five fields, each answering a
+question the one before it raises: what the problem is *and why it is hard*;
+the idea, mapped obstacle by obstacle onto that problem; what it concretely
+does, step by step; the mechanism that carries the result and where it stops
+working; then what came out. How the pipeline decomposes depends on what kind
+of paper it is — a model has training and inference, a cryo-EM structure has
+sample prep and reconstruction — so the type is chosen during the reading pass
+rather than assumed.
+
+The second half is where the value is. A summary restates the abstract; an
+assessment asks where each claim is actually supported, and the interesting
+rows are the ones where the answer is *nowhere*. So the note is structured
+rather than prose: every claim gets a row naming the figure, table or section
+that backs it, and a claim with no such pointer has to be recorded as having
+none. Validation enforces that — it cannot tell whether `Table 2` is the
 *right* table, but it will not let a claim through with "the authors state
 that…" in the evidence column.
 
@@ -79,10 +88,15 @@ Reading order is part of the skill, not an afterthought. Figures before the
 prose that interprets them, methods held to the single question of how those
 numbers were produced, related work last — once you know what the paper did and
 can judge whether it is compared against the right things.
+
 [`references/credibility-checks.md`](skills/paper-deep-reading/references/credibility-checks.md)
-carries the checklist, including the failure modes specific to computational
-biology, of which train/test homology leakage is the most common and the least
-often disclosed.
+carries the checklist. It leads with the three checks that have no equivalent
+outside biology: **correlation presented as mechanism** (a knockdown without a
+rescue is one experiment short of causal), **the model system and its distance
+to the claim** (HEK293 is not a neuron, overexpression is itself a
+perturbation), and **the proxy versus the target** (mRNA is not protein,
+colocalisation is not interaction). For computational work, train/test homology
+leakage is the most common failure and the least often disclosed.
 
 It also refuses to pretend it has the paper. Paywalled articles with no
 open-access version are reported as such, with the abstract, and the document
@@ -148,10 +162,11 @@ skills/
     scripts/          # bundled tooling
     references/       # per-API notes, loaded on demand
     tests/
+  paper-deep-reading/
+    ...               # same shape
 ```
 
-`paper-deep-reading/` and `code-reproduction/` will sit alongside it; neither
-exists yet.
+`code-reproduction/` will sit alongside them; it does not exist yet.
 
 Each skill folder carries a `SKILL.md` with YAML frontmatter (`name`, `description`).
 Skills are self-contained: no shared runtime, install one without the others.
