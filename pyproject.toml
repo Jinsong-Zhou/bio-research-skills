@@ -37,5 +37,6 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 extraPaths = [
     "skills/literature-tracking/scripts",
     "skills/paper-deep-reading/scripts",
+    "skills/code-reproduction/scripts",
 ]
 pythonVersion = "3.9"
