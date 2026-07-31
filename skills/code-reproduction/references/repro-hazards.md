@@ -7,20 +7,28 @@ Worked evidence throughout is [`NVIDIA-BioNeMo/Proteina-Complexa`](https://githu
 at commit `916eaae` (branch `dev`, read 2026-07-31) — a well-documented,
 actively maintained repository from a strong lab, which is the point. These
 are not the failures of a careless project. `tests/test_live_upstream.py`
-re-checks every claim below against the live repository; when upstream fixes
-one, that test fails and this file needs editing.
+re-checks eight of the claims below against the live repository — the default
+branch, the licence layout, the two swallowed install steps, the prose-only
+fix, the torch line, the accession-list sizes, and the absence of CI. When
+upstream fixes one of those, that test fails and this file needs editing. The
+rest of this page is not pinned that way; treat it as read on the date above.
 
 ---
 
 ## The clone does not land where you expect
 
 The default branch here is **`dev`**. A `master` also answers; `main` 404s.
-The README's own clone URL still names `NVIDIA-Digital-Bio`, an organisation
-that has since become `NVIDIA-BioNeMo` — that one redirects, so `git clone`
-follows it, but a `raw.githubusercontent.com` URL built from the old name does
-not.
+Anything that hardcodes `main` — a CI template, a `raw.githubusercontent.com`
+URL, a docs link — points at nothing.
 
-Cheap to check, and it invalidates every path you were about to read:
+The README's own clone URL still names `NVIDIA-Digital-Bio`, an organisation
+that has since become `NVIDIA-BioNeMo`. GitHub resolves both by repository ID,
+so the old name keeps working for clones and raw fetches alike; what it costs
+you is search. Grepping your notes for the current name will not find the
+issue thread, and the two names appear interchangeably in the wild.
+
+Checking the branch is cheap, and it invalidates every path you were about to
+read:
 
 ```bash
 gh api repos/OWNER/NAME --jq '.default_branch'
@@ -75,7 +83,11 @@ fi
 ```
 
 The script as published does not contain it, and Python 3.12 is the script's
-own default. Running it as shipped reproduces the documented failure.
+own default. Upstream is careful to say this hits "some users" and depends on
+which `llvmlite` and `numba` wheels resolve for you — which is worse than a
+deterministic failure, not better: the build succeeds on the machine where
+someone checks, and fails on yours, and the difference is invisible in both
+logs.
 
 Two details make this hard to spot by eye. The block sits inside a `>`
 blockquote callout, fence and all — so a fence detector that does not strip
@@ -134,7 +146,7 @@ The obstacles here are permissions, not FLOPs:
 |---|---|
 | Credentials | `HF_TOKEN`, `GITLAB_TOKEN`, `WANDB_API_KEY` in `.env_example` |
 | Hosts | NGC and Hugging Face, plus AWS and GitHub for community models |
-| Volume | up to ~200 GB documented across all variants |
+| Disk | ~50 GB of outputs for a single design run, 200 GB for a sweep — this is space the run *produces*, quoted separately from anything it downloads |
 | OS | Ubuntu 22.04+; 20.04 fails with GLIBC errors, hence the Docker path |
 | GPU | 24–80 GB VRAM depending on pipeline; single-GPU per job |
 

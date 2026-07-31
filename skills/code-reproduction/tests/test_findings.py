@@ -125,6 +125,17 @@ class TestRoundTrip:
         }
         assert Finding.from_dict(raw).evidence[0].line is None
 
+    def test_a_requires_of_the_wrong_shape_is_refused_rather_than_dropped(self):
+        """Dropping it takes a gate out of the report without saying so: the
+        finding is still listed, and it is listed as met."""
+        raw = {
+            "id": "hardware.vram", "layer": "hardware", "severity": "note",
+            "summary": "s", "evidence": [{"path": "a"}], "requires": ["vram_gb"],
+        }
+        with pytest.raises(FindingError) as caught:
+            Finding.from_dict(raw)
+        assert "hardware.vram" in str(caught.value)
+
 
 class TestOrdering:
     def test_worst_first_then_layer(self):

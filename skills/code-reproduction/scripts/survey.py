@@ -73,11 +73,21 @@ MAX_FILES = 20_000
 # license
 # --------------------------------------------------------------------------
 
-LICENSE_NAME = re.compile(r"^(licen[sc]e|copying|notice)", re.IGNORECASE)
+# Anchoring this at the start of the filename missed `MIT-LICENSE.txt` and
+# `Apache-2.0.txt`, and a repository whose only licence file is named that way
+# was reported as having no licence at all — the strongest finding here.
+LICENSE_NAME = re.compile(
+    r"(?:^|[-_.])(?:licen[sc]e|copying|notice)"
+    r"|^(?:apache|mit|bsd|gpl|agpl|lgpl|mpl|cc0|cc-?by|unlicense|isc)"
+    r"(?:[-_.\d][\w.\-]*)?\.(?:txt|md|rst)$",
+    re.IGNORECASE,
+)
 LICENSE_DIR = re.compile(r"(^|/)licen[sc]es?/", re.IGNORECASE)
 
-# Ordered: the first match wins, so narrower variants come before the family
-# they belong to (AGPL before GPL, CC-BY-NC before CC-BY).
+# Every signature that matches is reported, not just the first — see
+# `_identify`. The order still matters for reading the result: narrower
+# variants come before the family they belong to (AGPL before GPL, CC-BY-NC
+# before CC-BY), so a licence that trips both reads in the useful order.
 LICENSE_SIGNATURES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("AGPL-3.0", re.compile(r"GNU AFFERO GENERAL PUBLIC LICENSE", re.IGNORECASE)),
     ("LGPL", re.compile(r"GNU LESSER GENERAL PUBLIC LICENSE", re.IGNORECASE)),
@@ -182,6 +192,14 @@ TORCH_SPEC = re.compile(r"\btorch(?:vision|audio)?\s*[=><~]{1,2}\s*([\d.]+)")
 GLIBC = re.compile(r"\bGLIBC\b|\bglibc\b")
 UBUNTU = re.compile(r"Ubuntu\s*(\d{2}\.\d{2})\s*(\+|or (?:newer|later|above))?", re.IGNORECASE)
 PIN = re.compile(r"[=~!<>]=|@\s*git\+|\bfrom\s+lock")
+
+# One dependency line of a manifest: a package name, optional extras, and an
+# optional version clause. The bare-name case is the whole point — those are
+# the unpinned ones — and the guard this replaced skipped every line without
+# an `=` or a `"` in it, which is exactly what a floating requirements.txt
+# entry looks like. The check could not fire on requirements.txt at all.
+DEPENDENCY_LINE = re.compile(r"^[A-Za-z][\w.\-]*(?:\[[\w,\s\-]+\])?\s*(?:[=><~!@].*)?$")
+TOML_ASSIGNMENT = re.compile(r"^[A-Za-z][\w.\-]*\s*=\s*(?![=~<>])")
 
 MANIFEST_GLOBS = (
     "pyproject.toml", "requirements*.txt", "requirements/*.txt", "setup.py", "setup.cfg",
@@ -369,7 +387,7 @@ class Survey:
 
 def _looks_like_license(rel: str) -> bool:
     base = rel.rsplit("/", 1)[-1]
-    return bool(LICENSE_NAME.match(base) or LICENSE_DIR.search("/" + rel))
+    return bool(LICENSE_NAME.search(base) or LICENSE_DIR.search("/" + rel))
 
 
 def _license_scope(rel: str, only: bool = False) -> str:
@@ -513,7 +531,12 @@ def check_license(survey: Survey) -> None:
                 evidence=(Evidence(path=rel, line=1, quote=f"{', '.join(copyleft)} in {rel}"),),
             )
 
-        if not found:
+        # A pointer file matches no signature because it contains no terms,
+        # which is not a failure to identify it — it is already reported as
+        # `license.root-is-a-pointer` below. Filing it as inconclusive too
+        # made every repository laid out this way report `unknown` overall,
+        # including the one this skill uses as its worked example.
+        if not found and rel not in pointers:
             survey.unknown(
                 "license.identify",
                 f"{rel} matches no licence signature this script knows — read it by hand",
@@ -642,27 +665,37 @@ def check_weights(survey: Survey) -> None:
             requires={"env_vars": named},
         )
 
-    sizes: list[tuple[str, int, str, float]] = []
+    sizes: list[tuple[str, int, str, float, str]] = []
     for rel, number, line in repo.grep(SIZE, repo.docs()):
-        if not WEIGHT_WORDS.search(line) and not re.search(r"download|disk|storage", line, re.I):
+        # "50 GB of weights to fetch" and "200 GB for sweep outputs" both need
+        # the space, and they are not the same claim. Calling the second one a
+        # download was wrong about the very repository this skill documents.
+        if WEIGHT_WORDS.search(line) or re.search(r"\bdownloads?\b|\bfetch", line, re.I):
+            kind = "to download"
+        elif re.search(r"\bdisk\b|\bstorage\b|free space", line, re.I):
+            kind = "of working disk"
+        else:
             continue
         for amount, unit in SIZE.findall(line):
             gb = float(amount) * (1024 if unit.upper() == "TB" else 1)
-            sizes.append((rel, number, line, gb))
+            sizes.append((rel, number, line, gb, kind))
     if sizes:
         biggest = max(sizes, key=lambda item: item[3])
         survey.add(
             id="weights.disk",
             layer="weights",
             severity="note",
-            summary=f"The documentation states downloads up to {biggest[3]:.0f} GB",
-            detail="Largest single figure found near a download or weights mention; the total "
-            "across every artefact may be higher.",
+            summary=f"The documentation states up to {biggest[3]:.0f} GB {biggest[4]}",
+            detail="The largest single figure stated next to a download, weights or disk "
+            "mention. It is one line's number, not a total: what comes down and what the run "
+            "writes out are usually documented apart, when they are documented at all.",
             evidence=(Evidence(path=biggest[0], line=biggest[1], quote=biggest[2]),),
             requires={"disk_gb": round(biggest[3], 1)},
         )
     else:
-        survey.unknown("weights.disk", "no download size stated in the documentation")
+        survey.unknown(
+            "weights.disk", "no download or disk figure stated anywhere in the documentation"
+        )
 
     if not hosts_seen and not downloaders:
         survey.unknown(
@@ -733,6 +766,21 @@ def check_env(survey: Survey) -> None:
     _check_os_constraint(survey)
 
 
+def _pep440(spec: str) -> str:
+    """Conda's `python=3.10` in PEP 440 terms, which is what `requires` holds.
+
+    A single `=` means "this minor version, any patch". Left as it stood it
+    reached `python_satisfies` as an unparseable clause, and one unparseable
+    clause turns the whole report `unknown` — so an environment.yml was enough
+    to make the gate refuse to answer.
+    """
+    spec = spec.strip()
+    if not spec.startswith("=") or spec.startswith("=="):
+        return spec
+    version = spec[1:].strip()
+    return f"=={version}" if version.endswith("*") else f"=={version}.*"
+
+
 def _check_python_constraint(survey: Survey, manifests: list[str]) -> None:
     repo = survey.repo
     for rel in manifests:
@@ -741,7 +789,7 @@ def _check_python_constraint(survey: Survey, manifests: list[str]) -> None:
             match = pattern.search(text)
             if not match:
                 continue
-            spec = match.group(1).strip()
+            spec = _pep440(match.group(1))
             line = text[: match.start()].count("\n") + 1
             survey.add(
                 id="env.python",
@@ -906,13 +954,13 @@ def _check_pinning(survey: Survey, manifests: list[str]) -> None:
         text = repo.read(rel) or ""
         for number, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip().strip('",\'')
-            if not stripped or stripped.startswith("#") or "=" not in line and "\"" not in line:
+            if not stripped or stripped.startswith("#"):
                 continue
-            if not re.match(r"^[A-Za-z][\w.\-\[\]]*", stripped):
+            # `name = "proteina"` in a pyproject is metadata, not a floating
+            # dependency, and counting it as one skews the ratio below.
+            if TOML_ASSIGNMENT.match(stripped):
                 continue
-            if not re.search(r"[\w\]]\s*[=><~]", stripped) and not re.match(
-                r"^[A-Za-z][\w.\-\[\]]*$", stripped
-            ):
+            if not DEPENDENCY_LINE.match(stripped):
                 continue
             total += 1
             if PIN.search(stripped):
@@ -1170,6 +1218,25 @@ def git_facts(root: Path) -> dict[str, Any]:
         except (OSError, subprocess.SubprocessError):
             return None
         return done.stdout.strip() or None if done.returncode == 0 else None
+
+    # `git -C dir` walks upwards until it finds a repository. Surveying a
+    # subdirectory of a checkout — or a directory that merely sits inside one
+    # — therefore stamped the report with somebody else's commit, which is
+    # worse than no commit at all: the whole value of this field is that a
+    # reader can go back to the exact tree that was read.
+    toplevel = run("rev-parse", "--show-toplevel")
+    if not toplevel or Path(toplevel).resolve() != root.resolve():
+        return {
+            "commit": None,
+            "branch": None,
+            "committed": None,
+            "remote": None,
+            "describe": None,
+            "why": (
+                f"{root} is not the root of a git checkout"
+                + (f" (the enclosing one is {toplevel})" if toplevel else "")
+            ),
+        }
 
     return {
         "commit": run("rev-parse", "HEAD"),

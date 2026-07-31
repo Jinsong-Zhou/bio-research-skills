@@ -54,9 +54,7 @@ it does not apply.
 
 A research-workflow framework whose `ai-research-reproduction` entry point is
 README-first: it works through the repository's documented commands and emits
-an annotated copy of the README with per-section results, plus a
-`REPRODUCIBILITY_NOTES.md` recording commands, configs, seeds, checkpoints and
-known gaps.
+an annotated copy of the README with per-section results.
 
 **Where it fits:** the repository works and is documented, and you want the
 documented path executed and recorded.
@@ -64,16 +62,22 @@ documented path executed and recorded.
 **Where it does not:** like `phd-skills` it is aimed at deep-learning
 experiments generally, and says nothing about licence layers or access gates.
 
+One caution on reading its README: it also describes a `REPRODUCIBILITY_NOTES.md`
+capturing commands, configs, seeds and known gaps. That file is listed there
+under **future-compatible evidence concepts** and is not in the repository —
+plan for the annotated README, and write the run record yourself.
+
 ```bash
 npx skills add lllllllama/rigorpilot-skills --skill ai-research-reproduction
 ```
 
 ## 4. `bytedance/Repo2Run` — when the environment is the problem
 
-[github.com/bytedance/Repo2Run](https://github.com/bytedance/Repo2Run) — an
-agent that generates a working Dockerfile for a Python repository by
-iterating until the install succeeds. Not a skill; research code, and the
-licence is worth checking before use.
+[github.com/bytedance/Repo2Run](https://github.com/bytedance/Repo2Run) —
+Apache-2.0. An agent that generates a working Dockerfile for a Python
+repository by iterating until the install succeeds. Not a skill; research code
+accompanying a paper, and **archived** — it will not be fixed, so read it as a
+technique you can borrow rather than a tool you can depend on.
 
 **Where it fits:** the gate says `degraded` for environment reasons — swallowed
 install failures, a fix only in prose, a manifest that does not describe the

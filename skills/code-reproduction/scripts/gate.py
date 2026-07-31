@@ -5,7 +5,7 @@
 offers. This is the only place the two are compared, and the only place a
 verdict is issued.
 
-Four verdicts, and the third is the one that matters:
+Four verdicts, and `unknown` is the one that matters:
 
     blocked    a requirement is stated and this host does not meet it
     unknown    the requirement or the capability could not be determined
@@ -84,6 +84,11 @@ def _require_schema(payload: dict[str, Any], expected: str, flag: str) -> None:
         f"{flag} was handed a file declaring schema {found!r}, expected {expected}*"
         + (" — the --survey and --probe arguments look swapped" if swapped else "")
     )
+
+
+def _listing(payload: dict[str, Any], key: str) -> list[Any]:
+    value = payload.get(key)
+    return value if isinstance(value, list) else []
 
 
 def _worst(verdicts: list[str]) -> str:
@@ -178,12 +183,14 @@ def evaluate(key: str, needed: Any, probe: dict[str, Any]) -> dict[str, Any]:
             return _gate(
                 key, needed, None, "unknown", "the host probe did not report a GPU section"
             )
-        why = gpu.get("why", "no CUDA device visible")
-        return (
-            _gate(key, needed, True, "ok", "a CUDA device is present")
-            if available
-            else _gate(key, needed, False, "blocked", why)
-        )
+        if available:
+            return _gate(key, needed, True, "ok", "a CUDA device is present")
+        # "there is no GPU" and "nothing here could ask" are different claims,
+        # and only the first is a fact about this host. Telling someone their
+        # machine is unsuitable when `nvidia-smi` was merely off the PATH sends
+        # them to book different hardware they already have.
+        verdict = "blocked" if gpu.get("determined") is True else "unknown"
+        return _gate(key, needed, False, verdict, gpu.get("why", "no CUDA device visible"))
 
     if key == "vram_gb":
         have = gpu.get("vram_gb")
@@ -298,7 +305,7 @@ def assess(
     _require_schema(survey, SURVEY_SCHEMA, "--survey")
     _require_schema(probe, PROBE_SCHEMA, "--probe")
 
-    findings = [Finding.from_dict(raw) for raw in survey.get("findings", [])]
+    findings = [Finding.from_dict(raw) for raw in _listing(survey, "findings")]
     applicable = [f for f in findings if f.gates(target)]
     deferred = [f for f in findings if not f.gates(target)]
 
@@ -323,10 +330,15 @@ def assess(
             }
         )
 
+    # A malformed entry is still an entry: the survey recorded that something
+    # stayed open. Dropping it for being the wrong shape would remove an
+    # `unknown` from the verdict, which is the one direction that must never
+    # happen quietly.
     unresolved = [
         {"check": item.get("check", "?"), "why": item.get("why", "")}
-        for item in survey.get("inconclusive", [])
         if isinstance(item, dict)
+        else {"check": "?", "why": f"unreadable entry in the survey's inconclusive list: {item!r}"}
+        for item in _listing(survey, "inconclusive")
     ]
 
     verdicts = [row["verdict"] for row in rows] + (["unknown"] if unresolved else [])

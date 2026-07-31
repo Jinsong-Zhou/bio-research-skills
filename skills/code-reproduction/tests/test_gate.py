@@ -125,11 +125,19 @@ class TestUnknownOutranksDegraded:
 
 
 class TestSingleRequirements:
-    def test_a_missing_gpu_blocks_and_repeats_the_probe_reason(self):
-        gpu = {"available": False, "why": "nvidia-smi is not on PATH", "vram_gb": None}
+    def test_a_gpu_the_probe_could_not_ask_about_is_unknown_not_blocked(self):
+        """Telling someone their machine is unsuitable when `nvidia-smi` was merely
+        off the PATH sends them to book hardware they already have."""
+        gpu = {"available": False, "determined": False, "why": "nvidia-smi is not on PATH"}
+        result = evaluate("gpu", True, host(gpu=gpu))
+        assert result["verdict"] == "unknown"
+        assert "nvidia-smi" in result["why"]
+
+    def test_a_host_that_was_asked_and_has_no_card_blocks(self):
+        gpu = {"available": False, "determined": True, "why": "no CUDA device visible"}
         result = evaluate("gpu", True, host(gpu=gpu))
         assert result["verdict"] == "blocked"
-        assert "nvidia-smi" in result["why"]
+        assert "no CUDA device" in result["why"]
 
     def test_an_absent_gpu_section_is_unknown_not_blocked(self):
         """A probe that never reported is not a probe that reported nothing."""

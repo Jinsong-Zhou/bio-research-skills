@@ -120,9 +120,9 @@ weights — and "substitute a similar dataset" is meaningless when the dataset
 **inference**, and training is opt-in.
 
 The obstacles that actually stop you are obstacles of **access**: a checkpoint
-behind a login, 200 GB of downloads, a CUDA build the manifest never mentions,
-Ubuntu 22.04 or a GLIBC error, and a licence on the weights that is not the
-licence on the code.
+behind a login, a disk figure quoted for outputs that nobody budgeted for, a
+CUDA build the manifest never mentions, Ubuntu 22.04 or a GLIBC error, and a
+licence on the weights that is not the licence on the code.
 
 That last one is the part no other tool checks, and it is the only failure
 that arrives *after* the work succeeds. A repository's `LICENSE` file is not
@@ -146,9 +146,10 @@ It also hunts the silent failures, which are the same defect class as the
 HTTP 200s in `literature-tracking`. `env/build_uv_env.sh` in Proteina-Complexa
 ends two install steps with `|| echo "Warning: …"`: the build prints
 "Installation Complete!", the package is absent, and the run dies hundreds of
-steps later inside an unrelated import. The README documents a third failure
-and gives the fix — inside a `>` callout, and only in the README; the script
-as shipped still reproduces the bug it describes.
+steps later inside an unrelated import. For one of those two the README
+documents the cause and gives the fix — inside a `>` callout, and only in the
+README; the script as shipped does not contain it, and the workaround itself
+ends in `|| true`.
 
 Verdicts are `blocked`, `unknown`, `degraded`, `ok`, and **`unknown` ranks
 worse than `degraded`** on purpose. A stated 40 GB requirement against a card
@@ -304,8 +305,8 @@ changes something, those tests fail and say which guard needs a look.
   code copied.** It is also the worked example throughout
   `references/repro-hazards.md`: every hazard cited there is a real,
   reproducible observation about a well-maintained public repository, and
-  `tests/test_live_upstream.py` re-checks each one so the citations cannot rot
-  unnoticed.
+  eight of them are re-checked against the live repository by
+  `tests/test_live_upstream.py`, so those citations cannot rot unnoticed.
 
 ## License
 

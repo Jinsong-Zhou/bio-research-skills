@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 
 import pytest
 import survey as survey_module
@@ -23,8 +24,8 @@ of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction.
 """
 
-# Verbatim opening of the NVIDIA Open Model License. It contains the word
-# "commercial" repeatedly and grants commercial use — the exact text a naive
+# Condensed from the opening of the NVIDIA Open Model License. It contains the
+# word "commercial" and grants commercial use — the shape of text a naive
 # keyword scan misreads as a restriction.
 NVIDIA_OPEN_MODEL = """NVIDIA Open Model License Agreement
 
@@ -341,6 +342,20 @@ class TestHardware:
         assert "hardware.gpu" in ids_of(payload)
         assert "hardware.vram" in inconclusive_checks(payload)
 
+    def test_named_datacentre_cards_are_reported_when_no_figure_is_given(self, make_repo):
+        """"An A100" is a hint, not a number, and the report has to say which it has."""
+        root = make_repo(
+            {
+                "LICENSE": MIT,
+                "README.md": "Trained on a node of A100 cards; H100 also works.\n",
+                "run.py": "import torch\ndevice = 'cuda'\n",
+            }
+        )
+        payload = survey_repo(root)
+        found = finding(payload, "hardware.gpu-sku")
+        assert "requires" not in found
+        assert "hardware.vram" in inconclusive_checks(payload)
+
     def test_system_memory_on_the_same_line_is_not_read_as_vram(self, make_repo):
         """The figure has to be about the card, not merely near the word "memory"."""
         root = make_repo(
@@ -416,6 +431,117 @@ class TestHandoff:
     def test_ci_presence_is_noticed(self, make_repo):
         root = make_repo({"LICENSE": MIT, ".github/workflows/ci.yml": "on: push\n"})
         assert "handoff.no-ci" not in ids_of(survey_repo(root))
+
+
+class TestPythonConstraint:
+    def test_a_conda_pin_is_recorded_as_a_pep_440_specifier(self, make_repo):
+        """Conda writes `python=3.10`. Passed through as-is it reached the gate as
+        an unparseable clause, and one of those turns the entire report unknown —
+        so an environment.yml was enough to stop the gate answering at all."""
+        env = "name: demo\ndependencies:\n  - python=3.10\n  - pip\n"
+        root = make_repo({"LICENSE": MIT, "environment.yml": env})
+        assert finding(survey_repo(root), "env.python")["requires"] == {"python": "==3.10.*"}
+
+    def test_an_ordinary_specifier_is_left_alone(self, make_repo):
+        root = make_repo({"LICENSE": MIT, "pyproject.toml": 'requires-python = ">=3.12"\n'})
+        assert finding(survey_repo(root), "env.python")["requires"] == {"python": ">=3.12"}
+
+
+class TestProvenance:
+    def test_a_directory_inside_someone_elses_checkout_claims_no_commit(self, make_repo):
+        """`git -C dir` walks upwards. Stamping the report with the enclosing
+        repository's SHA is worse than leaving it blank: the field exists so a
+        reader can return to the exact tree that was read."""
+        root = make_repo({"LICENSE": MIT, "README.md": "hello\n"})
+        outer = root.parent
+        subprocess.run(["git", "init", "-q", str(outer)], check=True)
+        subprocess.run(["git", "-C", str(outer), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(outer), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "x"],
+            check=True,
+        )
+        git = survey_repo(root)["repo"]["git"]
+        assert git["commit"] is None
+        assert "not the root of a git checkout" in git["why"]
+
+    def test_a_real_checkout_root_reports_its_commit(self, make_repo):
+        root = make_repo({"LICENSE": MIT, "README.md": "hello\n"})
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "x"],
+            check=True,
+        )
+        assert len(survey_repo(root)["repo"]["git"]["commit"]) == 40
+
+
+class TestPinning:
+    """`env.unpinned` could not fire on a requirements.txt at all.
+
+    The line filter skipped anything without an `=` or a `"` in it, which is
+    the exact shape of the floating dependency the check exists to find.
+    """
+
+    def test_a_floating_requirements_file_is_reported(self, make_repo):
+        deps = "\n".join(["numpy", "scipy", "torch", "pandas", "einops", "hydra-core"])
+        pinned = "\n".join([f"pkg{n}==1.0" for n in range(4)])
+        root = make_repo({"LICENSE": MIT, "requirements.txt": f"{deps}\n{pinned}\n"})
+        found = finding(survey_repo(root), "env.unpinned")
+        assert "6 of 10" in found["summary"]
+
+    def test_a_lockfile_settles_the_question(self, make_repo):
+        deps = "\n".join(f"dep{n}" for n in range(12))
+        root = make_repo({"LICENSE": MIT, "requirements.txt": deps, "uv.lock": "version = 1\n"})
+        assert "env.unpinned" not in ids_of(survey_repo(root))
+
+    def test_project_metadata_is_not_counted_as_a_floating_dependency(self, make_repo):
+        pyproject = (
+            "[project]\n"
+            'name = "demo"\n'
+            'version = "0.1.0"\n'
+            'description = "a thing"\n'
+            "dependencies = [\n"
+            + "".join(f'  "dep{n}>=1.0",\n' for n in range(12))
+            + "]\n"
+        )
+        root = make_repo({"LICENSE": MIT, "pyproject.toml": pyproject})
+        payload = survey_repo(root)
+        assert "env.unpinned" not in ids_of(payload)
+
+
+class TestLicenceFilenames:
+    @pytest.mark.parametrize("name", ["LICENSE", "LICENSE.md", "MIT-LICENSE.txt", "COPYING"])
+    def test_a_licence_under_any_usual_name_is_found(self, make_repo, name):
+        root = make_repo({name: MIT, "README.md": "hello\n"})
+        assert "license.absent" not in ids_of(survey_repo(root))
+
+    def test_a_licence_named_after_its_family_is_found(self, make_repo):
+        root = make_repo({"Apache-2.0.txt": APACHE, "README.md": "hello\n"})
+        assert "license.absent" not in ids_of(survey_repo(root))
+
+    def test_an_unrelated_file_starting_with_a_family_name_is_not_a_licence(self, make_repo):
+        """`mitigation.txt` must not read as MIT, or the check that says
+        "no licence at all" stops meaning anything."""
+        root = make_repo({"mitigation.txt": "how we mitigate\n", "README.md": "hello\n"})
+        assert "license.absent" in ids_of(survey_repo(root))
+
+    def test_a_pointer_licence_is_reported_once_and_does_not_leave_an_open_question(
+        self, make_repo
+    ):
+        """It matches no signature because it holds no terms — which is what
+        `license.root-is-a-pointer` already says. Recording it as inconclusive as
+        well made every repository laid out this way report `unknown` overall,
+        the worked example in this skill's own documentation included."""
+        pointer = (
+            "This repository contains components under different licenses.\n\n"
+            "See the licenses/ directory for details.\n"
+        )
+        root = make_repo({"LICENSE": pointer, "licenses/code.txt": APACHE})
+        payload = survey_repo(root)
+        assert "license.root-is-a-pointer" in ids_of(payload)
+        assert "license.identify" not in inconclusive_checks(payload)
 
 
 class TestWhatTheSurveyCouldNotRead:

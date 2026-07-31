@@ -19,7 +19,8 @@ asked for: its credentials, its hosts. The two scripts stay decoupled — they
 share a file, not an import.
 
 Usage:
-    python3 probe.py [--from-survey survey.json] [--disk PATH] [--reach HOST ...]
+    python3 probe.py [--from-survey survey.json] [--disk PATH]
+                     [--reach HOST] [--reach HOST] ...
 
 Acknowledgement: the shape of this probe — one JSON snapshot per host, every
 field degrading rather than failing — follows `.claude/skills/_shared/scripts/
@@ -86,11 +87,19 @@ def probe_python() -> dict[str, Any]:
 
 
 def probe_gpu() -> dict[str, Any]:
-    """CUDA devices via `nvidia-smi`, with Apple's unified memory noted separately."""
+    """CUDA devices via `nvidia-smi`.
+
+    `available` is only half the answer; `determined` is the other half. A host
+    with a working card and no `nvidia-smi` on PATH is a shell that cannot see
+    it, not a machine without one, and only the second of those is a reason to
+    tell someone their hardware does not qualify. Apple silicon is recorded in
+    `platform.apple_silicon`; there is no CUDA device to report here either way.
+    """
     if shutil.which("nvidia-smi") is None:
         return {
             "available": False,
-            "why": "nvidia-smi is not on PATH — no CUDA device is visible from here",
+            "determined": False,
+            "why": "nvidia-smi is not on PATH — nothing here can see whether a CUDA device exists",
             "devices": [],
             "vram_gb": None,
             "cuda": None,
@@ -100,6 +109,7 @@ def probe_gpu() -> dict[str, Any]:
     if not listing:
         return {
             "available": False,
+            "determined": False,
             "why": "nvidia-smi is installed but returned nothing — driver or permission problem",
             "devices": [],
             "vram_gb": None,
@@ -122,6 +132,7 @@ def probe_gpu() -> dict[str, Any]:
     sizes = [d["vram_gb"] for d in devices if d["vram_gb"] is not None]
     return {
         "available": bool(devices),
+        "determined": True,
         "devices": devices,
         "count": len(devices),
         "vram_gb": min(sizes) if sizes else None,

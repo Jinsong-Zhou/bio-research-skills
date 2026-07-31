@@ -138,6 +138,15 @@ class Finding:
     def from_dict(cls, raw: Any) -> Finding:
         raw = raw if isinstance(raw, dict) else {}
         evidence = raw.get("evidence")
+        requires = raw.get("requires", {})
+        if not isinstance(requires, dict):
+            # Dropping it and carrying on would take a gate out of the report
+            # without anything saying so — the finding would still be listed,
+            # and it would be listed as met.
+            raise FindingError(
+                f"{raw.get('id', '?')}: `requires` must be an object, found "
+                f"{type(requires).__name__}"
+            )
         return cls(
             id=str(raw.get("id", "")),
             layer=str(raw.get("layer", "")),
@@ -148,7 +157,7 @@ class Finding:
             ),
             targets=tuple(str(t) for t in raw.get("targets", TARGETS)),
             detail=str(raw.get("detail", "")),
-            requires=dict(raw["requires"]) if isinstance(raw.get("requires"), dict) else {},
+            requires=dict(requires),
         )
 
     def gates(self, target: str) -> bool:
