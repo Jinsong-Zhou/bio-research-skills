@@ -1,5 +1,8 @@
 # bio-research-skills
 
+[![CI](https://github.com/Jinsong-Zhou/bio-research-skills/actions/workflows/ci.yml/badge.svg)](https://github.com/Jinsong-Zhou/bio-research-skills/actions/workflows/ci.yml)
+[![Live upstream checks](https://github.com/Jinsong-Zhou/bio-research-skills/actions/workflows/live.yml/badge.svg)](https://github.com/Jinsong-Zhou/bio-research-skills/actions/workflows/live.yml)
+
 Agent Skills for the daily grind of life-science research — **track** the literature,
 **read** what matters, **reproduce** the code.
 
@@ -17,7 +20,7 @@ npx skills add Jinsong-Zhou/bio-research-skills
 |---|---|---|
 | [`literature-tracking`](skills/literature-tracking/) | Three disconnected firehoses — arXiv q-bio, bioRxiv/medRxiv, PubMed. The same paper three times; alerts too broad or too narrow. | ✅ v0.1 |
 | [`paper-deep-reading`](skills/paper-deep-reading/) | One paper, read properly. Anything can summarise; knowing whether the conclusions actually hold is the work, and it is the part that never gets written down. | ✅ v0.1 |
-| `code-reproduction` | A GitHub link ≠ the paper's numbers: dependency drift, CUDA mismatches, missing weights, an afternoon lost. | 📋 planned |
+| [`code-reproduction`](skills/code-reproduction/) | A GitHub link ≠ the paper's numbers: dependency drift, CUDA mismatches, missing weights, an afternoon lost. | ✅ v0.1 |
 
 ### `literature-tracking`
 
@@ -103,6 +106,64 @@ open-access version are reported as such, with the abstract, and the document
 says on its first line that it was written without the full text — because an
 assessment built on an abstract is auditing the half that contains no evidence.
 
+### `code-reproduction`
+
+Takes the repository a paper points at and answers one question — **should you
+start?** — before the afternoon is spent. It does not run the model; when the
+answer is yes it hands over to a skill that does.
+
+The reason it exists alongside the good reproduction skills that already
+ship is that they all assume you are **retraining**. Their gap analysis is
+optimiser, batch size, augmentation order, loss coefficients; their smoke test
+checks that the initial loss is near `ln(1000)`; their advice when a dataset
+is private is to substitute a similar public one. That is the right shape for
+computer vision. In structural biology nobody retrains — you run released
+weights — and "substitute a similar dataset" is meaningless when the dataset
+*is* a list of 45,856 PDB accessions. So the default target here is
+**inference**, and training is opt-in.
+
+The obstacles that actually stop you are obstacles of **access**: a checkpoint
+behind a login, a disk figure quoted for outputs that nobody budgeted for, a
+CUDA build the manifest never mentions, Ubuntu 22.04 or a GLIBC error, and a
+licence on the weights that is not the licence on the code.
+
+That last one is the part no other tool checks, and it is the only failure
+that arrives *after* the work succeeds. A repository's `LICENSE` file is not
+its licence. Three consecutive papers from one lab, verified 2026-07-31:
+
+| | `proteina` | `la-proteina` | `Proteina-Complexa` |
+|---|---|---|---|
+| Layout | one `LICENSE` file | `LICENSE/` **directory** | `LICENSE` pointer + `licenses/` |
+| Code | NVIDIA License | Apache-2.0 | Apache-2.0 |
+| Weights | *same file* | NVIDIA **Open Model** License | NVIDIA **Open Model** License |
+| Commercial use | **no** | yes | yes |
+| GitHub's detector | `NOASSERTION` | **nothing** | `NOASSERTION` |
+
+The terms reverse between the first two, the two NVIDIA licences differ by one
+word, and GitHub's own detector is wrong about all three — for `la-proteina`
+because `LICENSE` there is a directory, which no root-file scanner can read.
+So the four layers — code, weights, data, third-party — are read separately,
+and every licence family in a file is collected rather than the first.
+
+It also hunts the silent failures, which are the same defect class as the
+HTTP 200s in `literature-tracking`. `env/build_uv_env.sh` in Proteina-Complexa
+ends two install steps with `|| echo "Warning: …"`: the build prints
+"Installation Complete!", the package is absent, and the run dies hundreds of
+steps later inside an unrelated import. For one of those two the README
+documents the cause and gives the fix — inside a `>` callout, and only in the
+README; the script as shipped does not contain it, and the workaround itself
+ends in `|| true`.
+
+Verdicts are `blocked`, `unknown`, `degraded`, `ok`, and **`unknown` ranks
+worse than `degraded`** on purpose. A stated 40 GB requirement against a card
+nobody probed is not a pass, and the failure this skill exists to prevent is a
+report that reads clear because a check quietly found nothing. Whatever the
+survey could not settle reaches the verdict rather than an appendix.
+
+When a repository ships its own agent instructions — Proteina-Complexa ships
+five — the skill says so and defers to them for how to run the pipeline,
+covering only what such files never do.
+
 ---
 
 ## Install
@@ -125,7 +186,8 @@ npx skills add Jinsong-Zhou/bio-research-skills --all -y
 ```
 
 Nothing here needs a package installed or a credential configured. The bundled
-scripts are standard-library Python 3.9+.
+scripts are standard-library Python 3.9+ — CI runs the whole suite on 3.9 and
+3.13, because a version floor nobody tests is a version floor nobody keeps.
 
 ### Word and slide output
 
@@ -164,9 +226,9 @@ skills/
     tests/
   paper-deep-reading/
     ...               # same shape
+  code-reproduction/
+    ...               # same shape
 ```
-
-`code-reproduction/` will sit alongside them; it does not exist yet.
 
 Each skill folder carries a `SKILL.md` with YAML frontmatter (`name`, `description`).
 Skills are self-contained: no shared runtime, install one without the others.
@@ -204,6 +266,11 @@ ignores unknown categories, that arXiv *still* accepts structured queries, and
 that preprint DOIs *still* come with the prefixes we route. When upstream
 changes something, those tests fail and say which guard needs a look.
 
+They run on a **Monday schedule**, not on pull requests, and a failure opens an
+issue. Both halves are deliberate: a third party's outage should not redden
+somebody's PR, and a scheduled job that fails where nobody looks is the same
+silent failure this repository is about.
+
 ## Acknowledgements
 
 - **[openags/paper-search-mcp](https://github.com/openags/paper-search-mcp)**
@@ -231,6 +298,24 @@ changes something, those tests fail and say which guard needs a look.
 - **[K-Dense-AI/scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills)**
   (MIT) — the practice of documenting each API's silent-failure modes in
   per-source `references/` files is theirs, and it is a good one.
+- **[fcakyon/phd-skills](https://github.com/fcakyon/phd-skills)** (MIT) —
+  `code-reproduction` deliberately stops where its `reproduce` skill starts,
+  and points at it. Its provenance-tagged gap analysis and three-tier smoke
+  test are better than anything a feasibility check should be growing, and
+  reimplementing them here would have been the wrong kind of thorough. **Ideas
+  and routing only; no code copied.**
+- **[lllllllama/RigorPilot-Skills](https://github.com/lllllllama/RigorPilot-Skills)**
+  (MIT) — the other handoff target, for README-first reproduction of a
+  repository that already works. Named as a prerequisite, not vendored.
+- **[NVIDIA-BioNeMo/Proteina-Complexa](https://github.com/NVIDIA-BioNeMo/Proteina-Complexa)**
+  (Apache-2.0 code, NVIDIA Open Model License weights) — the shape of
+  `probe.py`, one JSON snapshot per host with every field degrading rather
+  than failing, follows its `.claude/skills/_shared/scripts/preflight.sh`. **No
+  code copied.** It is also the worked example throughout
+  `references/repro-hazards.md`: every hazard cited there is a real,
+  reproducible observation about a well-maintained public repository, and
+  eight of them are re-checked against the live repository by
+  `tests/test_live_upstream.py`, so those citations cannot rot unnoticed.
 
 ## License
 
