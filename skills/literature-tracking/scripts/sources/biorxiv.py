@@ -41,8 +41,8 @@ SERVERS = ("biorxiv", "medrxiv")
 
 #: Subject areas accepted by each server, as returned by the API. Kept as
 #: canonical display strings; matching is case- and separator-insensitive.
-#: ``tests/test_sources.py::TestLiveBehaviour`` re-checks these against the
-#: live API.
+#: ``tests/literature-tracking/test_sources.py::TestLiveBehaviour`` in this
+#: skill's source repository re-checks these against the live API.
 CATEGORIES: dict[str, tuple[str, ...]] = {
     "biorxiv": (
         "animal behavior and cognition",

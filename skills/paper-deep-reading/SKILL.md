@@ -62,9 +62,13 @@ Read `fetch.json` before anything else:
   claims and no evidence, which is precisely the half being audited. Offer the
   alternative — if they can get the PDF themselves, pass the local path and
   start over.
-- **`warnings`** — the useful one is *"this preprint was later published as
-  …"*. That version predates peer review. Say which version the note
-  describes, and check whether the published one differs.
+- **`warnings`** — read every entry, not just the first. The one that changes
+  what to write is *"this preprint was later published as …"*: the preprint
+  predates peer review, so say which version the note describes and check
+  whether the published one differs. The one easiest to skip is *"the PDF
+  request was redirected to …"* — it is the only warning that fires while
+  `fulltext` still reads `"full"`, and it means nobody has confirmed the bytes
+  came from the address that was asked for.
 - **`path`** — read it with the Read tool. It is a real PDF; the script
   verified the bytes rather than the status code.
 
@@ -132,7 +136,7 @@ left in the paper's. Each answers a question the previous one raises:
 | Field | Carries |
 |---|---|
 | `problem` | what the work is after, and **why that is hard** — the obstacle, not the topic |
-| `approach` | the idea, and why it should work — answering each obstacle in `problem` one by one |
+| `approach` | the idea, and why it should work — answering each obstacle in `problem` one by one, and **saying so explicitly where one has no answer** |
 | `pipeline` | what it actually does, step by step; decomposition depends on `paper.type` |
 | `mechanism` | **why the idea has the effect it has.** The hardest field and the most valuable |
 | `findings` | what came out, with pointers (`Fig. 3b`). Report here; judge in step 5 |

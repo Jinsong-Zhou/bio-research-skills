@@ -6,7 +6,8 @@ what it looks like in the wild.
 Worked evidence throughout is [`NVIDIA-BioNeMo/Proteina-Complexa`](https://github.com/NVIDIA-BioNeMo/Proteina-Complexa)
 at commit `916eaae` (branch `dev`, read 2026-07-31) — a well-documented,
 actively maintained repository from a strong lab, which is the point. These
-are not the failures of a careless project. `tests/test_live_upstream.py`
+are not the failures of a careless project. In this skill's source repository,
+`tests/code-reproduction/test_live_upstream.py`
 re-checks eight of the claims below against the live repository — the default
 branch, the licence layout, the two swallowed install steps, the prose-only
 fix, the torch line, the accession-list sizes, and the absence of CI. When

@@ -4,10 +4,10 @@ The scripts run directly (``python3 scripts/survey.py``), which makes
 ``scripts/`` the import root at runtime. Tests reproduce that.
 
 These live under ``tests/`` rather than inside the skill because
-``npx skills add`` copies a skill directory wholesale — its only exclusions are
-``.git``, ``__pycache__`` and ``__pypackages__``. Colocated tests therefore
-shipped to every customer, who neither runs them nor wants them in the tree
-their agent reads.
+``npx skills add`` copies a skill directory wholesale — it skips the directories
+``.git``, ``__pycache__`` and ``__pypackages__``, and the file ``metadata.json``,
+and nothing else. Colocated tests therefore shipped to every customer, who
+neither runs them nor wants them in the tree their agent reads.
 """
 
 from __future__ import annotations

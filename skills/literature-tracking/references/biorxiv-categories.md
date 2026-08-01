@@ -10,8 +10,10 @@ inconsistent between records, so never compare raw strings.
 
 The lists below are supersets of what a sampling run observes — rare and
 retired areas are kept so old records still resolve.
-`tests/test_sources.py::TestLiveBehaviour::test_sampled_categories_stay_within_the_whitelist`
-checks the live API stays within them (`uv run pytest -m live`).
+In this skill's source repository,
+`tests/literature-tracking/test_sources.py::TestLiveBehaviour::test_sampled_categories_stay_within_the_whitelist`
+checks the live API stays within them (`uv run pytest -m live`). That suite is
+not part of an installed skill — these lists are what ships.
 
 ## bioRxiv (27)
 
