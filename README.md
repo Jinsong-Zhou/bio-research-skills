@@ -1,5 +1,8 @@
 # bio-research-skills
 
+[![CI](https://github.com/Jinsong-Zhou/bio-research-skills/actions/workflows/ci.yml/badge.svg)](https://github.com/Jinsong-Zhou/bio-research-skills/actions/workflows/ci.yml)
+[![Live upstream checks](https://github.com/Jinsong-Zhou/bio-research-skills/actions/workflows/live.yml/badge.svg)](https://github.com/Jinsong-Zhou/bio-research-skills/actions/workflows/live.yml)
+
 Agent Skills for the daily grind of life-science research — **track** the literature,
 **read** what matters, **reproduce** the code.
 
@@ -183,7 +186,8 @@ npx skills add Jinsong-Zhou/bio-research-skills --all -y
 ```
 
 Nothing here needs a package installed or a credential configured. The bundled
-scripts are standard-library Python 3.9+.
+scripts are standard-library Python 3.9+ — CI runs the whole suite on 3.9 and
+3.13, because a version floor nobody tests is a version floor nobody keeps.
 
 ### Word and slide output
 
@@ -261,6 +265,11 @@ The `live` tests are the interesting ones: they assert that bioRxiv *still*
 ignores unknown categories, that arXiv *still* accepts structured queries, and
 that preprint DOIs *still* come with the prefixes we route. When upstream
 changes something, those tests fail and say which guard needs a look.
+
+They run on a **Monday schedule**, not on pull requests, and a failure opens an
+issue. Both halves are deliberate: a third party's outage should not redden
+somebody's PR, and a scheduled job that fails where nobody looks is the same
+silent failure this repository is about.
 
 ## Acknowledgements
 
