@@ -1,0 +1,70 @@
+# The live checks, on a schedule — never on a pull request.
+#
+# These 25 tests hit real APIs and real repositories: arXiv, bioRxiv, PubMed,
+# Europe PMC, Crossref, and the upstream repository that `code-reproduction`
+# documents. They exist because every quirk this project guards against was
+# observed once, and an observation that nobody re-checks becomes a claim.
+# When upstream fixes something, the guard becomes wrong and a reference file
+# needs editing — that is a signal, not a build failure, which is why it does
+# not gate a pull request. A third party's outage should never redden someone
+# else's PR.
+#
+# A scheduled run that fails where nobody looks is the same silent failure this
+# repository is about, so a failure opens an issue rather than sitting in the
+# Actions tab. GitHub also disables scheduled workflows after 60 days without
+# repository activity; if these stop arriving, that is usually why.
+name: Live upstream checks
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays, 03:17 UTC — off the hour, where the queues are shorter
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run the live suite
+        id: live
+        # `shell: bash` is load-bearing, not decoration. The default shell for a
+        # `run:` step is `bash -e {0}`, without pipefail — so `pytest | tee`
+        # would report tee's exit code and this step would pass green while the
+        # suite failed. Naming the shell gets `-eo pipefail`. This is the same
+        # defect the survey hunts as `env.swallowed-install-failure`, and it was
+        # one line away from shipping in the repository that hunts it.
+        shell: bash
+        run: uv run pytest -m live --tb=short | tee live.log
+
+      - name: Open an issue if something upstream moved
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Live upstream checks are failing"
+          # One issue per outage, not one per week: reopening the same thread
+          # keeps the history of what moved and when.
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          body=$(printf '%s\n\n%s\n\n```\n%s\n```\n' \
+            "The scheduled live suite failed. Either an upstream API changed, or a documented quirk was fixed and the guard around it — and the reference file that cites it — now describes something that is no longer true." \
+            "Run: $RUN_URL" \
+            "$(tail -40 live.log 2>/dev/null || echo 'no log captured')")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
