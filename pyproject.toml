@@ -15,10 +15,20 @@ dependencies = []
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # Only tests/ uses this, to read SKILL.md frontmatter as strict YAML —
+    # deliberately stricter than Claude Code, which retries a failed parse with
+    # a fixup pass. The skills themselves stay standard-library, see
+    # `dependencies`.
+    "pyyaml>=6.0",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["skills"]
+# All tests live here, one directory per skill plus the repo-level checks. They
+# are deliberately outside skills/: `npx skills add` copies a skill directory
+# wholesale, skipping the directories .git, __pycache__ and __pypackages__ and
+# the file metadata.json, so anything else left in there ships to every
+# customer. tests/test_shipped_content.py holds that line.
+testpaths = ["tests"]
 markers = [
     "live: hits a real API; deselect with -m 'not live'",
 ]

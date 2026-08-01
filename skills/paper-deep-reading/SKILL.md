@@ -1,9 +1,22 @@
 ---
 name: paper-deep-reading
-description: Deep-read one paper end to end — explain what it does, then judge whether its conclusions actually hold and whether it is worth acting on — and deliver the result as a Word document. Use when handed a PDF, an arXiv id, a DOI or a preprint link and asked to read it properly, go through it carefully, evaluate it, critique it, or write it up. Triggers on "read this paper", "deep read", "精读", "help me understand this paper", "is this paper any good", "does this hold up", "review this preprint", "write up notes on this paper", or any request pairing one specific paper with more than a summary.
+description: >-
+  This skill should be used when deep-reading one paper end to end: explaining
+  what it does, judging whether its conclusions actually hold and whether it is
+  worth acting on, and delivering the result as a Word document. Applies to a
+  PDF, an arXiv id, a DOI or a preprint link. Triggers on "read this paper",
+  "deep read", "精读", "help me understand this paper", "is this paper any good",
+  "does this hold up", "review this preprint", "write up notes on this paper",
+  or any request pairing one specific paper with more than a summary.
 license: MIT
-allowed-tools: Bash Read Write
-compatibility: Needs network access and Python 3.9+. The bundled scripts use only the standard library — no packages to install, no credentials required. Set BIO_RESEARCH_CONTACT to your email so bioRxiv and Europe PMC can identify you. Word and slide output are rendered by the `docx` and `pptx` skills from `anthropics/skills`, which are licensed separately and need Node.js; without them the note still renders to Markdown.
+allowed-tools: Bash, Read, Write
+compatibility: >-
+  Needs network access and Python 3.9+. The bundled scripts use only the standard
+  library — no packages to install, no credentials required. Set
+  BIO_RESEARCH_CONTACT to your email so bioRxiv and Europe PMC can identify you.
+  Word and slide output are rendered by the `docx` and `pptx` skills from
+  `anthropics/skills`, which are licensed separately and need Node.js; without
+  them the note still renders to Markdown.
 metadata:
   version: "0.1"
   skill-author: "Jinsong Zhou"
@@ -17,15 +30,15 @@ summarise a paper, and a summary is not what someone asks for when they say
 "read this properly".
 
 `scripts/fetch.py` gets the PDF or says why it could not.
-`scripts/note.py` holds you to a shape — every claim you credit to the paper
-has to name where in the paper it lives.
-**You** do the reading, the judging and the writing. That part is not
-scriptable and no attempt is made to script it.
+`scripts/note.py` enforces a shape — every claim credited to the paper has to
+name where in the paper it lives.
+The reading, the judging and the writing are **not** scriptable, and no attempt
+is made to script them.
 
 ## Workflow
 
-**Invoke the scripts by path** — `python3 scripts/fetch.py`, from wherever you
-like. They import each other by bare name, and Python puts the script's own
+**Invoke the scripts by path** — `python3 scripts/fetch.py`, from any working
+directory. They import each other by bare name, and Python puts the script's own
 directory on `sys.path`, so `scripts/` becomes the import root on its own.
 
 ### 1. Get the paper
@@ -43,19 +56,23 @@ instead of returning something that looks like a paper.
 
 Read `fetch.json` before anything else:
 
-- **`fulltext: "abstract-only"`** — ⚠️ stop and tell the user. You can still
-  write something, but it is a summary of an abstract, and it must be labelled
+- **`fulltext: "abstract-only"`** — ⚠️ stop and tell the user. Something can
+  still be written, but it is a summary of an abstract and must be labelled
   that way. An assessment built on an abstract is worthless: abstracts contain
-  claims and no evidence, which is precisely the half you are supposed to be
-  auditing. Offer the alternative — if they can get the PDF themselves, pass
-  the local path and start over.
-- **`warnings`** — the useful one is *"this preprint was later published as
-  …"*. The version you are about to read predates peer review. Say which
-  version the note describes, and check whether the published one differs.
+  claims and no evidence, which is precisely the half being audited. Offer the
+  alternative — if they can get the PDF themselves, pass the local path and
+  start over.
+- **`warnings`** — read every entry, not just the first. The one that changes
+  what to write is *"this preprint was later published as …"*: the preprint
+  predates peer review, so say which version the note describes and check
+  whether the published one differs. The one easiest to skip is *"the PDF
+  request was redirected to …"* — it is the only warning that fires while
+  `fulltext` still reads `"full"`, and it means nobody has confirmed the bytes
+  came from the address that was asked for.
 - **`path`** — read it with the Read tool. It is a real PDF; the script
   verified the bytes rather than the status code.
 
-### 2. Find out who you are reading for
+### 2. Find out who the note is for
 
 The note ends with a section on relevance to the user's own work, and that
 section is the only one that needs information the paper does not contain.
@@ -74,17 +91,17 @@ empty section, because the user cannot tell the two apart.
 
 The order matters more than it sounds. Reading a paper the way it is printed
 means meeting the authors' interpretation of their data before the data
-itself, and you do not fully recover from that.
+itself, and that first impression does not fully wash out.
 
 1. **Abstract, then the last paragraph of the Introduction.** That paragraph is
    where papers list their contributions. Copy the claims out **verbatim** —
-   these are what you audit in step 5, and the exact wording is the thing being
+   these are what step 5 audits, and the exact wording is the thing being
    audited. "Improves binding affinity prediction" and "improves binding
    affinity prediction by 12% over AlphaFold3" are not the same claim and do
    not need the same evidence.
 
    **Decide `paper.type` here too** — `computational`, `experimental`,
-   `method`, `resource` or `theory`. It changes what you look for in the rest
+   `method`, `resource` or `theory`. It changes what to look for in the rest
    of the pass and how step 4's pipeline section decomposes. When a paper both
    builds a model and validates it at the bench, ask which one the paper would
    still be worth publishing without.
@@ -102,111 +119,36 @@ itself, and you do not fully recover from that.
    hyperparameter sensitivity, the failure cases and the full baseline table
    live here. Skipping it is the single most common way a paper's weakest point
    goes unmentioned.
-7. **Related work, last.** Once you know what the paper did, you can judge
-   whether it is compared against the right things. Before that, you cannot.
+7. **Related work, last.** Only once the paper's own contribution is clear can
+   its choice of comparisons be judged. Before that, it cannot.
 
 ### 4. Write the first half — teach the paper
 
 **Write as a professor explaining to a capable colleague from a neighbouring
 field, not as an abstract-shortening service.** The test is whether a reader
-who has never seen this paper could, after your section, say why the work was
-hard and why this particular idea was a reasonable bet. A section that only
-restates what the paper did has failed even if every sentence is true.
+who has never seen this paper could, afterwards, say why the work was hard and
+why this particular idea was a reasonable bet. A section that only restates
+what the paper did has failed even if every sentence is true.
 
 Five fields, in the user's language, with technical terms and figure references
-left in the paper's. They are ordered so each answers a question the previous
-one raises — write them in order and the logic flows on its own.
+left in the paper's. Each answers a question the previous one raises:
 
-#### `problem` — what, and **why it is hard**
-
-Not the topic. The obstacle. Three things have to be in here:
-
-1. What are they trying to achieve, concretely enough to know when it is done.
-2. **Why is that hard?** What is the specific difficulty — combinatorial size,
-   no ground truth, the signal is below the noise, the assay destroys the
-   sample, the interesting cases are the rare ones?
-3. **Where did previous attempts get stuck, and why?** Not "existing methods
-   have limitations" — *which* limitation, arising from *what* about how they
-   worked.
-
-If you cannot say why the problem is hard, you have not found the problem yet.
-Go back to the introduction and the related work.
-
-#### `approach` — the idea, and **why it should work**
-
-Take the obstacles you just named and answer them **one by one**. The reader
-should be able to draw a line from each difficulty in `problem` to something
-in `approach`. If a difficulty has no answer here, say so explicitly — a paper
-that solves two of three obstacles and is quiet about the third is telling you
-where its weakness is.
-
-State the central idea in one or two sentences before any detail. If you
-cannot, you have not understood it yet — and an analogy is worth using here,
-provided you say where the analogy breaks.
-
-#### `pipeline` — what it actually does, step by step
-
-Concrete and sequential, so the reader could sketch the flow. **How this
-decomposes depends on `paper.type`:**
-
-| `paper.type` | Decompose as |
+| Field | Carries |
 |---|---|
-| `computational` | **Training**: what data, what the model sees, what it predicts, what the loss rewards. Then **inference**: what you must supply at run time, what comes back, what post-processing runs. Keep them separate — conflating them hides whether a resource is needed once or every time. |
-| `experimental` | **System → perturbation → readout → analysis.** Which organism, cell line, or reconstituted system. What was changed and how. What was measured, on what instrument, at what resolution. What the raw data had to go through to become the figure. |
-| `method` | The protocol as someone would run it: inputs, steps, what each step is for, what it outputs, where it can fail. |
-| `resource` | How the data was collected, what was included and excluded, how it is annotated, how someone queries it. |
-| `theory` | The assumptions, the derivation's spine, and what would have to be true in reality for it to apply. |
+| `problem` | what the work is after, and **why that is hard** — the obstacle, not the topic |
+| `approach` | the idea, and why it should work — answering each obstacle in `problem` one by one, and **saying so explicitly where one has no answer** |
+| `pipeline` | what it actually does, step by step; decomposition depends on `paper.type` |
+| `mechanism` | **why the idea has the effect it has.** The hardest field and the most valuable |
+| `findings` | what came out, with pointers (`Fig. 3b`). Report here; judge in step 5 |
 
-Three things belong here regardless of type, because they are the ones most
-often omitted and they bound everything downstream:
-
-- **The model system, and its distance from the claim.** A result in HEK293
-  cells is not a result in neurons; a result in *E. coli* is not a result in
-  humans; an *in vitro* reconstitution is not a cell. State what was used.
-- **What was physically measured, versus what is being concluded from it.**
-  Expression is not function. Binding in one assay at one concentration is not
-  affinity. Colocalisation is not interaction. Predicted structure is not
-  structure.
-- **Sample size and replication.** Biological replicates or technical ones?
-  How many? A study with n = 3 wells from one culture has n = 1.
-
-#### `mechanism` — why it works, in depth
-
-The single hardest and most valuable field. `approach` says what the idea is;
-this says **why that idea has the effect it has**. Name the one thing that
-carries the result — most papers have exactly one — and then go under it:
-
-- What would happen if it were removed? Does the paper show that (an ablation,
-  a knockout, a mutant, a control)?
-- Is it doing what the authors say it is doing, or is something correlated with
-  it doing the work? This is the question their ablations either answer or dodge.
-- Under what conditions would it stop working? The boundary tells you more
-  about a mechanism than the successes do.
-
-For a biological claim, this is where the causal question lives. Correlation
-plus a plausible story is not mechanism. Look for the intervention: knockdown
-*and* rescue, dose dependence, a point mutation that abolishes exactly the
-proposed interaction. Say which of these the paper has and which it asserts.
-
-#### `findings` — what came out
-
-Results with pointers (`Fig. 3b`, `Table 2`). Report here; judge in step 5.
-Include the numbers that matter and the units and conditions they were measured
-under — "12% better" without saying better at what, measured how, against what
-is not a result.
-
-#### Register
-
-- Explain each technical term the first time it appears, in one clause.
-- Prefer the concrete: "the pocket is too shallow to hold the ligand at
-  physiological pH" beats "binding is suboptimal".
-- Analogies are welcome and **must** be accompanied by where they fail.
-- Ban the empty intensifiers: *novel*, *significant improvement*, *demonstrates
-  the effectiveness of*. If a sentence survives deleting them unchanged, it was
-  not carrying information.
+Read [references/writing-the-explanation.md](references/writing-the-explanation.md)
+before writing these. It carries what each field has to contain, the five
+`paper.type` decompositions for `pipeline`, the three things that belong in
+`pipeline` regardless of type — model system, measured-versus-concluded, sample
+size — and the register to write in.
 
 `scripts/note.py validate` warns when one of these fields is too short to be
-doing this job. It is a floor, not a target — clearing it is not the same as
+doing this job. It is a floor, not a target: clearing it is not the same as
 having explained anything.
 
 ### 5. Audit the claims — this is what a deep read is for
@@ -223,18 +165,18 @@ Take the verbatim claim list from step 3.1. Every claim gets a row:
 Three rules:
 
 - **Evidence is a pointer into the paper.** "The authors state that…" is the
-  claim restated, not evidence for it. When you have the full text, `note.py
-  validate` rejects an evidence field that names no figure, table, section or
-  page. Supplementary citations count and are expected — `Fig. S3`, `Table S1`.
-  On an `abstract-only` note the demand is dropped, because there is nothing
-  to point at.
+  claim restated, not evidence for it. Given the full text, `note.py validate`
+  rejects an evidence field that names no figure, table, section or page.
+  Supplementary citations count and are expected — `Fig. S3`, `Table S1`. On an
+  `abstract-only` note the demand is dropped, because there is nothing to point
+  at.
 - **A claim with no evidence anywhere is a finding, not a blank.** Set
   `evidence` to null and say so in `issue` — "asserted in the abstract and the
   discussion; no experiment in the paper measures it". That row is often the
   most valuable one in the table.
-- **Confidence is about the evidence, not about the paper.** A paper you like
-  can have a low-confidence claim; a paper you find unconvincing can have
-  high-confidence ones. Grade each row on its own.
+- **Confidence is about the evidence, not about the paper.** An appealing paper
+  can carry a low-confidence claim; an unconvincing one can carry
+  high-confidence claims. Grade each row on its own.
 
 Read `references/credibility-checks.md` before writing this section. Alongside
 the general checks — baseline vintage, missing ablations, variance reporting —
@@ -266,7 +208,7 @@ available, roughly how much compute) and `next_steps` when the decision is to
 follow up.
 
 A verdict of `skip` on a well-executed paper is a legitimate outcome; so is
-`follow-up` on a flawed one whose core idea is worth having. Say which you mean.
+`follow-up` on a flawed one whose core idea is worth having. Say which is meant.
 
 ### 7. Validate and render
 
@@ -279,7 +221,7 @@ all rejected — Word renders them as literal characters. A blank line starts a
 new paragraph, and list items go in the fields that are already lists
 (`next_steps`, `limitations.*`, `authors`). The check reads the whole note, so
 it covers `paper.venue` and `paper.url` too. Statistical significance is not
-markup and is not rejected: write `(***, p < 0.001)` as you would in a paper.
+markup and is not rejected: write `(***, p < 0.001)` as a paper would.
 
 **Write lists as lists.** `"next_steps": "watch for a code release"` is a
 string, not a list of one, and it used to render as a numbered list with one
@@ -350,10 +292,10 @@ preprint DOI, whichever prefix it carries. A note whose claims name their
 evidence and whose empty sections are labelled as empty.
 
 **Do not.** Read, judge, summarise or write. Check that a figure reference is
-*correct* — validation checks that you cited something, not that you cited the
-right thing. Parse the PDF; you read it directly. Vouch for a local file: a
-path you pass in is reported as full text with a warning if it does not start
-with `%PDF-`, because you may have had a reason to point at it.
+*correct* — validation checks that something was cited, not that the right
+thing was. Parse the PDF; it is read directly. Vouch for a local file: a path
+passed in is reported as full text with a warning if it does not start with
+`%PDF-`, because there may have been a reason to point at it.
 
 ## Traps
 
@@ -364,15 +306,15 @@ preprint DOIs now carry either of two prefixes with neither mapping to a single
 server.
 
 - **The abstract is an argument, not a description.** Read it for the claim
-  list, then set it aside. If your assessment agrees with the abstract on every
-  point, you have summarised rather than audited.
+  list, then set it aside. An assessment that agrees with the abstract on every
+  point has summarised rather than audited.
 - **Preprints drift.** `fetch.py` reports when a preprint was later published.
   The reviewed version can differ substantially, and a note that does not say
   which version it read cannot be checked later.
 - **Do not launder uncertainty into fluency.** If the method section is unclear
   about something load-bearing, that goes in `issue` as a finding about the
-  paper. Writing a confident paraphrase of something you could not follow is
-  the one failure mode of this skill that is invisible in the output.
+  paper. A confident paraphrase of something that could not be followed is the
+  one failure mode of this skill that is invisible in the output.
 - **`fetch.py` covers three routes, not all of them.** Paywalled journal
   articles without an open-access version cannot be retrieved, by design.
   Say so and ask for the PDF.

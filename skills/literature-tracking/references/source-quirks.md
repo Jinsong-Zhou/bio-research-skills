@@ -35,7 +35,7 @@ single-entry feed titled `Error`, surfacing the reason from its `<summary>`.
 > **HTTP 500**; both land in `FetchError` rather than the guard. The guard is
 > kept as belt-and-braces — it costs one `findall` per fetch, and this API has
 > changed shape before — but it is no longer the thing catching this case.
-> `tests/test_sources.py::TestLiveBehaviour` asserts the *invariant* (a
+> `tests/literature-tracking/test_sources.py::TestLiveBehaviour` asserts the *invariant* (a
 > malformed structured query must be refused **somehow**) rather than the
 > mechanism, so it will fail if arXiv ever starts answering one with plausible
 > unfiltered results.
@@ -129,7 +129,7 @@ first page, and advancing the cursor by 100 skips 70 records per step.
 > with each other and neither agreed with the API.
 >
 > Fixing the instance is not enough — a constant that happens to equal today's
-> page size passes just as well. `tests/test_sources.py` therefore serves
+> page size passes just as well. `tests/literature-tracking/test_sources.py` therefore serves
 > **ragged** batches (30, 17, 30, 8, 25) and derives its assertion from the
 > stub's own log of what it returned, so no literal can satisfy it. Verify page
 > size against the live API, never against your own mock.
