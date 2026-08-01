@@ -318,8 +318,9 @@ That skill is licensed separately from this one — © Anthropic, and its terms
 run through the user's agreement with Anthropic. It is not vendored here and
 cannot be. (The `docx` npm package it drives is MIT and a different thing.)
 
-**If it is unavailable, deliver `/tmp/note.md` and say why.** A Markdown note in
-hand beats a Word document that never arrived.
+**If it is unavailable, deliver `/tmp/note.md`, say why, and give the user the
+two install lines above.** A Markdown note in hand beats a Word document that
+never arrived — and nobody installs a skill they were never told the name of.
 
 Four layout facts, measured by building the document and looking at it:
 
