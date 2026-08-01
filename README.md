@@ -32,11 +32,11 @@ still renders to Markdown, and says why.
 
 ## Skills
 
-| Skill | What it lifts off your plate | The part nobody else does |
-|---|---|---|
-| 📡 **[`literature-tracking`](skills/literature-tracking/)**<br>`v0.1` | Three disconnected firehoses — arXiv q-bio, bioRxiv/medRxiv, PubMed. The same paper three times; alerts too broad or too narrow. | **Merges preprints with the journal versions they became** — identical DOI, bioRxiv's `published` field, a guarded title fingerprint, Crossref relations. And it refuses the **HTTP 200** every one of these APIs answers a broken query with.<br>[→ source quirks](skills/literature-tracking/references/source-quirks.md) |
-| 📖 **[`paper-deep-reading`](skills/paper-deep-reading/)**<br>`v0.1` | One paper, read properly. Anything can summarise; knowing whether the conclusions actually hold is the work, and it never gets written down. | A `.docx` in two halves — what the paper does, then whether it holds up. **Every claim names the figure or table behind it**, and a claim backed by nothing is recorded as such. Leads with the checks that have no equivalent outside biology.<br>[→ credibility checks](skills/paper-deep-reading/references/credibility-checks.md) |
-| 🔬 **[`code-reproduction`](skills/code-reproduction/)**<br>`v0.1` | A GitHub link ≠ the paper's numbers: dependency drift, CUDA mismatches, missing weights, an afternoon lost. | Answers **should you start?** before the afternoon is spent. Defaults to inference, because in structural biology nobody retrains. **Reads licences in four layers** — a repository's `LICENSE` file is not its licence. `unknown` ranks worse than `degraded`, on purpose. |
+| Skill | What it lifts off your plate |
+|---|---|
+| 📡 **[`literature-tracking`](skills/literature-tracking/)** | Three disconnected firehoses — arXiv q-bio, bioRxiv/medRxiv, PubMed. The same paper three times; alerts too broad or too narrow. |
+| 📖 **[`paper-deep-reading`](skills/paper-deep-reading/)** | One paper, read properly. Anything can summarise; knowing whether the conclusions actually hold is the work, and it never gets written down. |
+| 🔬 **[`code-reproduction`](skills/code-reproduction/)** | A GitHub link ≠ the paper's numbers: dependency drift, CUDA mismatches, missing weights, an afternoon lost. |
 
 ## Acknowledgements
 
