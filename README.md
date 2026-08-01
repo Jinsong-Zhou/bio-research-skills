@@ -32,56 +32,11 @@ still renders to Markdown, and says why.
 
 ## Skills
 
-### 📡 [`literature-tracking`](skills/literature-tracking/) · v0.1
-
-*Three disconnected firehoses — arXiv q-bio, bioRxiv/medRxiv, PubMed. The same
-paper three times; alerts too broad or too narrow.*
-
-- Queries every source in one pass and hands back one ranked, deduplicated set.
-- **Merges preprints with the journal versions they became** — the part nobody
-  else does. Four rules, cheapest first: identical DOI, bioRxiv's `published`
-  field, a guarded title fingerprint, Crossref's preprint relations.
-- Refuses to fail silently. These APIs answer **HTTP 200** to a broken query:
-  bioRxiv ignores an unknown subject area and returns everything, Europe PMC
-  drops clauses it cannot parse, PubMed dates year-only records to 1 January.
-  Each has a guard and measured evidence in
-  [`references/source-quirks.md`](skills/literature-tracking/references/source-quirks.md).
-
-### 📖 [`paper-deep-reading`](skills/paper-deep-reading/) · v0.1
-
-*One paper, read properly. Anything can summarise; knowing whether the
-conclusions actually hold is the work, and it never gets written down.*
-
-- Takes a PDF, an arXiv id, a DOI or a preprint link; returns a Word document in
-  two halves — what the paper does, then whether it holds up.
-- The first half **teaches**: the problem *and why it is hard*, the idea mapped
-  obstacle by obstacle, the pipeline step by step, the mechanism and where it
-  stops working.
-- The second half is a table, not prose. Every claim names the figure, table or
-  section that backs it; a claim backed by nothing is recorded as such, and
-  validation will not accept "the authors state that…" as evidence.
-- Leads with the checks that have no equivalent outside biology — correlation
-  presented as mechanism, model-system distance, proxy versus target, train/test
-  homology leakage
-  ([`references/credibility-checks.md`](skills/paper-deep-reading/references/credibility-checks.md)).
-
-### 🔬 [`code-reproduction`](skills/code-reproduction/) · v0.1
-
-*A GitHub link ≠ the paper's numbers: dependency drift, CUDA mismatches, missing
-weights, an afternoon lost.*
-
-- Answers one question — **should you start?** — before the afternoon is spent.
-  It does not run the model; when the answer is yes it hands over to a skill
-  that does.
-- Defaults to **inference**, training opt-in. The good reproduction skills all
-  assume you are retraining; in structural biology nobody is.
-- Reads licences in four layers — code, weights, data, third-party — because a
-  repository's `LICENSE` file is not its licence. Across three consecutive
-  papers from one lab the terms reverse, and GitHub's own detector is wrong
-  about all three.
-- Verdicts are `blocked`, `unknown`, `degraded`, `ok`, and **`unknown` ranks
-  worse than `degraded`** on purpose: a report that reads clear because a check
-  quietly found nothing is the failure this skill exists to prevent.
+| Skill | What it lifts off your plate | The part nobody else does |
+|---|---|---|
+| 📡 **[`literature-tracking`](skills/literature-tracking/)**<br>`v0.1` | Three disconnected firehoses — arXiv q-bio, bioRxiv/medRxiv, PubMed. The same paper three times; alerts too broad or too narrow. | **Merges preprints with the journal versions they became** — identical DOI, bioRxiv's `published` field, a guarded title fingerprint, Crossref relations. And it refuses the **HTTP 200** every one of these APIs answers a broken query with.<br>[→ source quirks](skills/literature-tracking/references/source-quirks.md) |
+| 📖 **[`paper-deep-reading`](skills/paper-deep-reading/)**<br>`v0.1` | One paper, read properly. Anything can summarise; knowing whether the conclusions actually hold is the work, and it never gets written down. | A `.docx` in two halves — what the paper does, then whether it holds up. **Every claim names the figure or table behind it**, and a claim backed by nothing is recorded as such. Leads with the checks that have no equivalent outside biology.<br>[→ credibility checks](skills/paper-deep-reading/references/credibility-checks.md) |
+| 🔬 **[`code-reproduction`](skills/code-reproduction/)**<br>`v0.1` | A GitHub link ≠ the paper's numbers: dependency drift, CUDA mismatches, missing weights, an afternoon lost. | Answers **should you start?** before the afternoon is spent. Defaults to inference, because in structural biology nobody retrains. **Reads licences in four layers** — a repository's `LICENSE` file is not its licence. `unknown` ranks worse than `degraded`, on purpose. |
 
 ## Acknowledgements
 
