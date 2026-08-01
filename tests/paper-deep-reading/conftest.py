@@ -2,6 +2,12 @@
 
 The scripts run directly (``python3 scripts/fetch.py``), which makes
 ``scripts/`` the import root at runtime. Tests reproduce that.
+
+These live under ``tests/`` rather than inside the skill because
+``npx skills add`` copies a skill directory wholesale — its only exclusions are
+``.git``, ``__pycache__`` and ``__pypackages__``. Colocated tests therefore
+shipped to every customer, who neither runs them nor wants them in the tree
+their agent reads.
 """
 
 import sys
@@ -10,7 +16,11 @@ from pathlib import Path
 
 import pytest
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+# This directory is named after the skill it covers, so the mapping cannot drift
+# silently: rename one without the other and the assertion below says so.
+HERE = Path(__file__).resolve().parent
+SCRIPTS = HERE.parents[1] / "skills" / HERE.name / "scripts"
+assert SCRIPTS.is_dir(), f"no skills/{HERE.name}/scripts to test against"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 

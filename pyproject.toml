@@ -21,9 +21,11 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# `skills` is each skill's own suite; `tests` is the repository's, which checks
-# the parts of a skill that live outside its scripts.
-testpaths = ["skills", "tests"]
+# All tests live here, one directory per skill plus the repo-level checks. They
+# are deliberately outside skills/: `npx skills add` copies a skill directory
+# wholesale, excluding only .git, __pycache__ and __pypackages__, so anything
+# left in there is shipped to every customer.
+testpaths = ["tests"]
 markers = [
     "live: hits a real API; deselect with -m 'not live'",
 ]

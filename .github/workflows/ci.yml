@@ -1,6 +1,6 @@
 # The offline suite, on every push and pull request.
 #
-# Nothing here reaches the network. Each skill's tests/conftest.py installs an
+# Nothing here reaches the network. Each tests/<skill>/conftest.py installs an
 # autouse guard that raises a BaseException if a test opens a socket, so a test
 # that quietly starts depending on a live API fails here rather than passing in
 # CI and failing on a customer's laptop.
