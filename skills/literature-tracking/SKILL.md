@@ -1,6 +1,14 @@
 ---
 name: literature-tracking
-description: Track new life-science papers across arXiv q-bio, bioRxiv, medRxiv and PubMed in one pass, merging preprints with their published journal versions so nothing appears twice, then rank what is left against the user's research interests. Use when asked what is new in a field, for a literature digest or weekly roundup, to catch up after time away, to monitor a topic or set of authors, or whenever a query spans more than one preprint server or literature database. Triggers on "anything new on X", "papers this week", "literature digest", "what did I miss", "keep me updated on", "recent preprints", or any mention of arXiv q-bio, bioRxiv, medRxiv or PubMed together.
+description: >-
+  This skill should be used when tracking new life-science papers across arXiv
+  q-bio, bioRxiv, medRxiv and PubMed in one pass: merging preprints with their
+  published journal versions so nothing appears twice, then ranking what is left
+  against the user's research interests. Covers a field digest, a weekly
+  roundup, catching up after time away, and monitoring a topic or set of
+  authors. Triggers on "anything new on X", "papers this week", "literature
+  digest", "what did I miss", "keep me updated on", "recent preprints", or any
+  query spanning more than one preprint server or literature database.
 license: MIT
 allowed-tools: Bash, Read
 compatibility: >-
@@ -20,15 +28,16 @@ Three literature firehoses, one deduplicated stream, ranked against what the
 user actually works on.
 
 `scripts/track.py` does the deterministic half — query, normalise, deduplicate.
-**You** do the judgement half: deciding what is worth their attention and
-saying why. Do not try to script that; you are better at it than a keyword
-filter, and you can explain yourself.
+The judgement half is **not** its job: deciding what is worth the user's
+attention, and saying why. Do not try to script that. A model reading titles
+and abstracts beats a keyword filter at it, and can explain its reasoning
+afterwards.
 
 ## Workflow
 
 ### 1. Establish the research profile
 
-You need topics before you can rank. Take them from the conversation, from
+Ranking is impossible without topics. Take them from the conversation, from
 project memory, or ask. A usable profile has:
 
 - **topics** — what they study, in their words ("cryo-EM of membrane
@@ -138,7 +147,7 @@ back. Pair them with a subject term through `--pubmed-term`, e.g.
 `'("molecular dynamics"[TIAB] AND (protein[TIAB] OR membrane[TIAB]))'`.
 
 A whole run takes minutes, not seconds, and prints progress to stderr. Let it
-finish; a killed run leaves you with a truncated JSON file that still parses.
+finish; a killed run leaves behind a truncated JSON file that still parses.
 
 ### 5. Check `stats` and `errors` before reading a single paper
 
@@ -206,7 +215,7 @@ legitimately surfaces papers published months earlier. `published_date` is when
 it was published; `extra.entrez_date` is what the search filtered on. Do not
 present an April paper under a "this week" heading without saying which is which.
 
-### 6. Rank against the profile — this is your job
+### 6. Rank against the profile — the part no script does
 
 A 200-paper report is roughly 250 KB; do not read it whole. Start with the
 records the keyword channel flagged, then sweep the rest by title:
@@ -228,7 +237,7 @@ for i,p in enumerate(d['papers']):
 
 The flag is a prior, not a filter. Subject-area records without it still
 matter — the papers a keyword alert ranks lowest and a human ranks highest
-live there, which is the whole reason ranking is your job and not a `grep`.
+live there, which is the whole reason this step is judgement and not a `grep`.
 
 Then judge each shortlisted paper on title and abstract:
 
@@ -271,7 +280,7 @@ the highest-ranked source (`pubmed` > `biorxiv`/`medrxiv` > `arxiv` >
 therefore never *appear* in `also_in` — looking for it there marks every real
 publication as unpublished.
 
-| What you see | What it is |
+| What the record shows | What it is |
 |---|---|
 | `source: pubmed`, `also_in` has a preprint server | A genuine preprint-and-journal pair. Cite the journal version, mention the preprint — often the copy they can read without a subscription. |
 | `source` and every `also_in` entry are preprint sources | The *same preprint* through two channels, typically `biorxiv` + `europepmc`. **There is no journal version.** This is the common case — usually the large majority of merges. |

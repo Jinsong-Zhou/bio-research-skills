@@ -1,6 +1,16 @@
 ---
 name: code-reproduction
-description: Decide whether a research code repository can actually be run here before committing time to it — read its licence layers separately (code, weights, data, third-party), find the credentials, downloads and GPUs it will demand, name the install failures its build script swallows, and gate all of that against this machine. Defaults to reproducing the inference path; covers training only when asked. Use when handed a GitHub link from a paper and asked whether it can be reproduced, what it needs, what it will cost, whether the weights may be used commercially, or why it will not build. Triggers on "can I reproduce this", "can I run this repo", "复现这篇论文的代码", "what do I need to run this", "will this run on my machine", "what licence are these weights", "is this repo usable", "why won't this install", or any paper-plus-repository pair where the question is feasibility rather than science.
+description: >-
+  This skill should be used when deciding whether a research code repository can
+  actually be run here, before committing time to it: licence layers read
+  separately (code, weights, data, third-party), the credentials, downloads and
+  GPUs it will demand, the install failures its build script swallows, all gated
+  against this machine. Inference by default; training only when asked.
+  Triggers on "can I reproduce this", "can I run this repo", "复现这篇论文的代码",
+  "what do I need to run this", "will this run on my machine", "what licence are
+  these weights", "is this repo usable", "why won't this install", or any
+  paper-plus-repository pair where the question is feasibility rather than
+  science.
 license: MIT
 allowed-tools: Bash, Read, Write
 compatibility: >-
@@ -18,13 +28,13 @@ metadata:
 # Code reproduction
 
 A link at the end of a paper is not a reproduction. Between the two sit a
-licence that may forbid what you intend, weights behind a login, a dataset
+licence that may forbid the intended use, weights behind a login, a dataset
 that shipped as a list of accession numbers, a CUDA build the manifest does
-not mention, and a GPU you may not have. Each is cheap to check and expensive
-to discover — the expensive discovery being the one that happens four hours
-in.
+not mention, and a GPU this host may not have. Each is cheap to check and
+expensive to discover — the expensive discovery being the one that happens
+four hours in.
 
-This skill answers one question: **should you start?** It does not run the
+This skill answers one question: **is it worth starting?** It does not run the
 model. When the answer is yes, it hands over to a skill that does.
 
 ## Scope
@@ -35,7 +45,7 @@ are obstacles of access. Training is a different exercise with different
 obstacles, and it is opt-in: pass `--target training` only when the user has
 asked for training specifically. Never quietly widen the scope; a report that
 says `ok` for inference says nothing about training, and `gate.py` prints that
-sentence for you.
+sentence unprompted.
 
 **This skill does not execute the repository.** No environment is built, no
 weights are downloaded, no model is run. Everything below reads files and
@@ -46,8 +56,8 @@ inspects the local machine.
 ### 1. Establish the target
 
 Inference unless the user said training. If they said "reproduce the paper"
-without qualifying it, that is inference — say so in one line so they can
-correct you.
+without qualifying it, that is inference — say so in one line, so the
+assumption is theirs to correct.
 
 ### 2. Get the repository
 
