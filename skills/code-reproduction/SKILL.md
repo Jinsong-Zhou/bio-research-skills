@@ -2,8 +2,14 @@
 name: code-reproduction
 description: Decide whether a research code repository can actually be run here before committing time to it — read its licence layers separately (code, weights, data, third-party), find the credentials, downloads and GPUs it will demand, name the install failures its build script swallows, and gate all of that against this machine. Defaults to reproducing the inference path; covers training only when asked. Use when handed a GitHub link from a paper and asked whether it can be reproduced, what it needs, what it will cost, whether the weights may be used commercially, or why it will not build. Triggers on "can I reproduce this", "can I run this repo", "复现这篇论文的代码", "what do I need to run this", "will this run on my machine", "what licence are these weights", "is this repo usable", "why won't this install", or any paper-plus-repository pair where the question is feasibility rather than science.
 license: MIT
-allowed-tools: Bash Read Write
-compatibility: Needs Python 3.9+ and `git` to clone the repository under review. The bundled scripts use only the standard library — no packages to install, no credentials required. `probe.py` reads `nvidia-smi` when present and degrades cleanly when it is not; it opens a network connection only when you pass `--reach`, and it records whether a credential is set, never its value. Running the repository itself is out of scope and is handed to other skills — see references/handoff.md.
+allowed-tools: Bash, Read, Write
+compatibility: >-
+  Needs Python 3.9+ and `git` to clone the repository under review. The bundled
+  scripts use only the standard library — no packages to install, no credentials
+  required. `probe.py` reads `nvidia-smi` when present and degrades cleanly when
+  it is not; it opens a network connection only with `--reach`, and it records
+  whether a credential is set, never its value. Running the repository itself is
+  out of scope and is handed to other skills — see references/handoff.md.
 metadata:
   version: "0.1"
   skill-author: "Jinsong Zhou"

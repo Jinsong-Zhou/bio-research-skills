@@ -15,10 +15,15 @@ dependencies = []
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # Only tests/ uses this, to read SKILL.md frontmatter the way Claude Code
+    # does. The skills themselves stay standard-library — see `dependencies`.
+    "pyyaml>=6.0",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["skills"]
+# `skills` is each skill's own suite; `tests` is the repository's, which checks
+# the parts of a skill that live outside its scripts.
+testpaths = ["skills", "tests"]
 markers = [
     "live: hits a real API; deselect with -m 'not live'",
 ]

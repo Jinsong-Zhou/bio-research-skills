@@ -2,8 +2,14 @@
 name: paper-deep-reading
 description: Deep-read one paper end to end — explain what it does, then judge whether its conclusions actually hold and whether it is worth acting on — and deliver the result as a Word document. Use when handed a PDF, an arXiv id, a DOI or a preprint link and asked to read it properly, go through it carefully, evaluate it, critique it, or write it up. Triggers on "read this paper", "deep read", "精读", "help me understand this paper", "is this paper any good", "does this hold up", "review this preprint", "write up notes on this paper", or any request pairing one specific paper with more than a summary.
 license: MIT
-allowed-tools: Bash Read Write
-compatibility: Needs network access and Python 3.9+. The bundled scripts use only the standard library — no packages to install, no credentials required. Set BIO_RESEARCH_CONTACT to your email so bioRxiv and Europe PMC can identify you. Word and slide output are rendered by the `docx` and `pptx` skills from `anthropics/skills`, which are licensed separately and need Node.js; without them the note still renders to Markdown.
+allowed-tools: Bash, Read, Write
+compatibility: >-
+  Needs network access and Python 3.9+. The bundled scripts use only the standard
+  library — no packages to install, no credentials required. Set
+  BIO_RESEARCH_CONTACT to your email so bioRxiv and Europe PMC can identify you.
+  Word and slide output are rendered by the `docx` and `pptx` skills from
+  `anthropics/skills`, which are licensed separately and need Node.js; without
+  them the note still renders to Markdown.
 metadata:
   version: "0.1"
   skill-author: "Jinsong Zhou"

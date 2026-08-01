@@ -2,8 +2,13 @@
 name: literature-tracking
 description: Track new life-science papers across arXiv q-bio, bioRxiv, medRxiv and PubMed in one pass, merging preprints with their published journal versions so nothing appears twice, then rank what is left against the user's research interests. Use when asked what is new in a field, for a literature digest or weekly roundup, to catch up after time away, to monitor a topic or set of authors, or whenever a query spans more than one preprint server or literature database. Triggers on "anything new on X", "papers this week", "literature digest", "what did I miss", "keep me updated on", "recent preprints", or any mention of arXiv q-bio, bioRxiv, medRxiv or PubMed together.
 license: MIT
-allowed-tools: Bash Read
-compatibility: Needs network access and Python 3.9+. Scripts use only the standard library — no packages to install, no credentials required. Set BIO_RESEARCH_CONTACT to your email so Crossref and NCBI can identify you. NCBI_API_KEY is optional and buys headroom against a ban rather than speed: it raises NCBI's server-side limit to 10 requests/second, but the client paces to 3/s either way.
+allowed-tools: Bash, Read
+compatibility: >-
+  Needs network access and Python 3.9+. Scripts use only the standard library —
+  no packages to install, no credentials required. Set BIO_RESEARCH_CONTACT to
+  your email so Crossref and NCBI can identify you. NCBI_API_KEY is optional and
+  buys headroom against a ban rather than speed — it raises NCBI's server-side
+  limit to 10 requests/second, but the client paces to 3/s either way.
 metadata:
   version: "0.1"
   skill-author: "Jinsong Zhou"
