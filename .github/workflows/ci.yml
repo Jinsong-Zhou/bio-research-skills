@@ -1,0 +1,47 @@
+# The offline suite, on every push and pull request.
+#
+# Nothing here reaches the network. Each skill's tests/conftest.py installs an
+# autouse guard that raises a BaseException if a test opens a socket, so a test
+# that quietly starts depending on a live API fails here rather than passing in
+# CI and failing on a customer's laptop.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv run ruff check .
+
+  test:
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and a current release. The skills ship as standalone stdlib
+        # scripts precisely so `npx skills add` needs no install step, which
+        # makes "runs on Python 3.9" a promise to a stranger rather than a
+        # preference — and it went untested until this file existed.
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv run --python ${{ matrix.python }} pytest -m "not live"
