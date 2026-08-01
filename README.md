@@ -6,8 +6,6 @@
 Agent Skills for the daily grind of life-science research — **track** the
 literature, **read** what matters, **reproduce** the code.
 
-Not a chatbot you query. Skills that take a task and do it.
-
 ## Install
 
 Requires Node.js. Works with Claude Code, Cursor, Codex and 40+ other agents via
@@ -19,16 +17,9 @@ npx skills add Jinsong-Zhou/bio-research-skills -g                           # g
 npx skills add Jinsong-Zhou/bio-research-skills --skill literature-tracking  # just one
 ```
 
-Nothing needs a package installed or a credential configured — the bundled
-scripts are standard-library Python 3.9+, and CI runs the suite on 3.9 and 3.13.
-Set `BIO_RESEARCH_CONTACT` to your email so Crossref and NCBI can identify you.
-
-`paper-deep-reading` delivers a `.docx` through the `docx` skill from
-[anthropics/skills](https://github.com/anthropics/skills) — **licensed
-separately**, © Anthropic, needs Node.js, not vendored here. Install it with
-`/plugin marketplace add anthropics/skills` then
-`/plugin install document-skills@anthropic-agent-skills`. Without it the note
-still renders to Markdown, and says why.
+That is the whole setup. The bundled scripts are standard-library Python 3.9+ —
+nothing to install, nothing to configure. Where a skill wants more than that, it
+says so when the moment comes and works without it in the meantime.
 
 ## Skills
 
